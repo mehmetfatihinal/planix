@@ -1,0 +1,32 @@
+{
+  "cli": {
+    "version": ">= 18.12.2",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://api.megaajans.de",
+        "EXPO_PUBLIC_DEFAULT_LANGUAGE": "tr"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://api.megaajans.de",
+        "EXPO_PUBLIC_DEFAULT_LANGUAGE": "tr"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

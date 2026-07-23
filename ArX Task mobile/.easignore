@@ -1,0 +1,14 @@
+# Keep EAS uploads lean and reproducible.
+node_modules/
+.expo/
+.gradle/
+android/.gradle/
+android/app/build/
+android/app/.cxx/
+android/build/
+expo-mobile.log
+expo-mobile.err.log
+metro.log
+*.log
+dist/
+web-build/

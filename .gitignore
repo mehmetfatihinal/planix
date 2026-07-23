@@ -1,0 +1,68 @@
+# === Bağımlılıklar & derleme çıktıları ===
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+
+# === Loglar ===
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# === .NET API ===
+api/**/bin/
+api/**/obj/
+api/**/*.db
+api/**/*.db-shm
+api/**/*.db-wal
+# Eski yayınlama/geçici kopyalar (içlerinde eski appsettings/sır kalıntıları olabilir)
+api/**/publish-plesk*/
+api/**/plesk-*/
+api/**/temp-build/
+api/**/temp-deploy/
+api-publish/
+
+# === GİZLİ BİLGİLER — asla commit edilmez ===
+# Ortam ayarları / anahtarlar
+**/appsettings.Development.json
+**/appsettings.Production.json
+.env
+.env.local
+.env.*.local
+# Firebase
+google-services.json
+GoogleService-Info.plist
+# Uygulama imza anahtarı (kaybolursa güncelleme imzalanamaz — ayrıca gizli kalmalı)
+*.keystore
+*.jks
+**/credentials/
+.storepass
+# Yüklenen dosyalar
+api/**/uploads/
+uploads/
+
+# === Mobil (Expo / React Native) ===
+# node_modules & Expo cache
+**/node_modules/
+.expo/
+**/.expo/
+.expo-export-test/
+.expo-export-js/
+# Native klasörler prebuild ile üretilir; içlerinde keystore, gradle.properties (şifre),
+# google-services.json ve derleme çıktıları olduğu için tamamı hariç tutulur.
+android/
+ios/
+
+# === Derlenmiş uygulama paketleri / ikili çıktılar ===
+*.apk
+*.aab
+*.ipa
+
+# === Ekran görüntüleri / geçici çıktılar (isteğe bağlı) ===
+mobile-screen.png
+apk-build.log

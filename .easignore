@@ -1,0 +1,35 @@
+# If EAS packages from the repository root, exclude everything unrelated to the mobile app.
+.git/
+.next/
+api/
+app/
+components/
+lib/
+locales/
+public/
+types/
+.claude/
+node_modules/
+*.log
+tsconfig.tsbuildinfo
+
+# Exclude mobile build artifacts regardless of whether paths are resolved
+# from the repo root or the mobile project root.
+.expo/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+expo-mobile.log
+expo-mobile.err.log
+metro.log
+
+ArX Task mobile/node_modules/
+ArX Task mobile/.expo/
+ArX Task mobile/android/.gradle/
+ArX Task mobile/android/build/
+ArX Task mobile/android/app/build/
+ArX Task mobile/android/app/.cxx/
+ArX Task mobile/expo-mobile.log
+ArX Task mobile/expo-mobile.err.log
+ArX Task mobile/metro.log

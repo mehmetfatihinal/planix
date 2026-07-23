@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  background: #faf7f2;
+}
+
+:root.dark {
+  color-scheme: dark;
+  background: #121212;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100%;
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(201, 166, 107, 0.18), transparent 28rem),
+    #faf7f2;
+  color: #1f1f1f;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+}
+
+.dark body {
+  background:
+    radial-gradient(circle at top left, rgba(180, 58, 74, 0.16), transparent 28rem),
+    #121212;
+  color: #f5f0ea;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+::selection {
+  background: rgba(139, 30, 45, 0.22);
+}
+
+.premium-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(107, 98, 91, 0.28) transparent;
+}
+
+.premium-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.premium-scroll::-webkit-scrollbar-thumb {
+  background: rgba(107, 98, 91, 0.26);
+  border-radius: 999px;
+}
+
+.glass-border {
+  border: 1px solid rgba(31, 31, 31, 0.08);
+}
+
+.dark .glass-border {
+  border-color: #2a2a2a;
+}
+
+.focus-ring {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.focus-ring:focus-visible {
+  outline-color: #8b1e2d;
+}
+
+.auth-tech-bg {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(176, 48, 64, 0.18), transparent 34rem),
+    radial-gradient(circle at 100% 100%, rgba(176, 48, 64, 0.12), transparent 34rem),
+    #0d141d;
+}
+
+.auth-tech-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 30px 30px;
+  pointer-events: none;
+}
+
+.auth-register-visual {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.42;
+  background:
+    linear-gradient(90deg, #0d141d 0%, rgba(13, 20, 29, 0.86) 58%, rgba(13, 20, 29, 0.2) 100%),
+    radial-gradient(circle at 22% 24%, rgba(176, 48, 64, 0.22), transparent 18rem),
+    radial-gradient(circle at 70% 65%, rgba(255, 179, 181, 0.08), transparent 20rem),
+    #080f17;
+}
+
+.auth-register-visual::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle at 2px 2px, rgba(255, 255, 255, 0.07) 1px, transparent 0);
+  background-size: 32px 32px;
+}
