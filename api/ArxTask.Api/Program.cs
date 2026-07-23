@@ -85,10 +85,29 @@ builder.Services
     });
 
 builder.Services.AddAuthorization();
+// İzin verilen ek origin son ekleri (Cors:AllowedOriginSuffixes). Varsayılan olarak
+// Vercel ve Netlify dağıtımlarının tüm alt adresleri (production + preview) kabul edilir;
+// böylece Vercel/Netlify URL'si değiştiğinde API'yi tekrar dağıtmaya gerek kalmaz.
+var allowedOriginSuffixes =
+    builder.Configuration.GetSection("Cors:AllowedOriginSuffixes").Get<string[]>()
+    ?? builder.Configuration["Cors:AllowedOriginSuffixes"]?
+        .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+    ?? [".vercel.app", ".netlify.app"];
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("web", policy =>
-        policy.WithOrigins(allowedOrigins)
+        policy.SetIsOriginAllowed(origin =>
+            {
+                if (string.IsNullOrWhiteSpace(origin)) return false;
+                if (allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) return true;
+                try
+                {
+                    var host = new Uri(origin).Host;
+                    return allowedOriginSuffixes.Any(suffix =>
+                        host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+                }
+                catch { return false; }
+            })
             .AllowAnyHeader()
             .AllowAnyMethod());
 });
