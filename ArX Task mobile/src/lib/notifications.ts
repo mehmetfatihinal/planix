@@ -9,6 +9,7 @@ import {
   rejectTaskRequest,
   removeMobileDevice
 } from "@/lib/api";
+import { muteRegionForToday } from "@/lib/geofence-throttle";
 
 type NotificationsModuleLike = {
   IosAuthorizationStatus?: { PROVISIONAL?: number };
@@ -156,6 +157,11 @@ export async function configureNotificationCategories() {
   await notifications.setNotificationCategoryAsync("approval-request", [
     { identifier: "approve", buttonTitle: "Onayla" },
     { identifier: "reject", buttonTitle: "Reddet" }
+  ]);
+
+  // Geofence hatırlatmaları: yaklaşınca çıkan bildirimi o gün için susturur.
+  await notifications.setNotificationCategoryAsync("geofence-reminder", [
+    { identifier: "mute-today", buttonTitle: "Bugün sorma" }
   ]);
 }
 
@@ -404,12 +410,21 @@ type NotificationPayload = {
   url?: string;
   taskId?: string;
   requesterId?: string;
+  regionId?: string;
 };
 
 export async function handleNotificationActionResponse(response: any, authToken?: string | null) {
   const payload = response?.notification?.request?.content?.data as NotificationPayload | undefined;
   const actionIdentifier = response?.actionIdentifier;
   if (!payload || actionIdentifier === getDefaultNotificationActionIdentifier()) {
+    return;
+  }
+
+  // Geofence hatırlatmasını o gün için sustur — sunucu tokenı gerekmez, tamamen yerel.
+  if (actionIdentifier === "mute-today") {
+    if (payload.regionId) {
+      await muteRegionForToday(payload.regionId);
+    }
     return;
   }
 
