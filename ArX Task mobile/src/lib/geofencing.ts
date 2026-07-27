@@ -6,6 +6,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createRoute } from "@/lib/api";
 import { getToken } from "@/lib/storage";
 import { buildRoutePayloadFromPlan, buildTodayRoutePlan } from "@/lib/today-route";
+import { markNotified, shouldNotify } from "@/lib/geofence-throttle";
 import {
   MAX_OPEN_TASK_SNAPSHOT,
   MAX_TASK_OPPORTUNITY_REGIONS,
@@ -117,7 +118,7 @@ async function sendLocalNotification(title: string, body: string, data: Record<s
   if (!notifications?.scheduleNotificationAsync) return;
   await ensureAndroidChannel(notifications);
   await notifications.scheduleNotificationAsync({
-    content: { title, body, sound: "default", data },
+    content: { title, body, sound: "default", data, categoryIdentifier: "geofence-reminder" },
     // Immediate on iOS; a ~half-second date trigger on Android so it lands on the heads-up channel.
     trigger:
       Platform.OS === "android"
@@ -153,12 +154,17 @@ TaskManager.defineTask(GEOFENCE_TASK, async (body: any) => {
     const entry = map[region.identifier];
     if (!entry) return;
 
+    // Tekrar kontrolü: aynı yer için tür başına bekleme süresi dolmadan
+    // veya "Bugün sorma" denmişken bildirim çıkmaz.
+    if (!(await shouldNotify(region.identifier, entry.kind))) return;
+
     if (entry.kind === "seller") {
       await sendLocalNotification(
         "🛒 Alışveriş hatırlatması",
         `${entry.companyName} yakınında: ${entry.itemName} alınacak`,
-        { url: "/shopping", geofence: true, seller: region.identifier }
+        { url: "/shopping", geofence: true, seller: region.identifier, regionId: region.identifier }
       );
+      await markNotified(region.identifier);
       return;
     }
 
@@ -167,8 +173,26 @@ TaskManager.defineTask(GEOFENCE_TASK, async (body: any) => {
       await sendLocalNotification(
         "Yol üzeri alışveriş",
         `🛒 ${entry.shopName} yakında: ${entry.itemName} al`,
-        { url: "/shopping", geofence: true, errand: region.identifier }
+        { url: "/shopping", geofence: true, errand: region.identifier, regionId: region.identifier }
       );
+      await markNotified(region.identifier);
+      return;
+    }
+
+    if (entry.kind === "task-opportunity") {
+      // Bugüne tarihli olmayan ama güzergâhın üzerinde kalan açık iş.
+      const body =
+        entry.taskCount > 1
+          ? `${entry.companyName} yakınında — ${entry.taskCount} açık işin var`
+          : `${entry.companyName} yakınında — "${entry.taskTitle}"`;
+      await sendLocalNotification("Yol üzerinde işin var", body, {
+        taskId: entry.taskId,
+        companyId: region.identifier.slice(TASK_OPPORTUNITY_PREFIX.length),
+        url: "/today",
+        geofence: true,
+        regionId: region.identifier
+      });
+      await markNotified(region.identifier);
       return;
     }
 
@@ -181,8 +205,10 @@ TaskManager.defineTask(GEOFENCE_TASK, async (body: any) => {
       taskId: entry.taskId,
       companyId: region.identifier,
       url: "/today",
-      geofence: true
+      geofence: true,
+      regionId: region.identifier
     });
+    await markNotified(region.identifier);
   } catch {
     // A headless task must never throw.
   }
@@ -365,10 +391,10 @@ export async function loadTaskOpportunities(todayKey: string): Promise<TaskOppor
   return stored.items.slice(0, MAX_TASK_OPPORTUNITY_REGIONS);
 }
 
-// Rebuilds the full geofence set (home + today's task companies + route errands + shopping
-// sellers) within the 20-region OS budget. Priority: home → company reminders → route errands
-// → sellers (errands + sellers share the remaining slots). Persists a lookup map the headless
-// task reads to compose the notifications.
+// Rebuilds the full geofence set (home + today's task companies + on-the-way task
+// opportunities + route errands + shopping sellers) within the 20-region OS budget.
+// Priority: home → company reminders → task opportunities → route errands → sellers.
+// Persists a lookup map the headless task reads to compose the notifications.
 export async function syncGeofences(input: SyncGeofencesInput) {
   if (isExpoGo()) return;
   try {
@@ -422,6 +448,31 @@ export async function syncGeofences(input: SyncGeofencesInput) {
         taskTitle: reminder.taskTitle,
         taskId: reminder.taskId,
         taskCount: reminder.taskCount
+      };
+    }
+
+    // 2.5 Yol üzeri görev fırsatları — bugünün görev firmalarından sonra, alışverişten
+    // önce. Kullanıcının çerçevesi "o iş için bir daha dışarı çıkmayayım"; alışveriş ikincil.
+    const opportunities = await loadTaskOpportunities(todayKeyLocal());
+    for (const opportunity of opportunities) {
+      if (regions.length >= MAX_REGIONS) break;
+      if (!hasCoords(opportunity.latitude, opportunity.longitude)) continue;
+      const identifier = `${TASK_OPPORTUNITY_PREFIX}${opportunity.companyId}`;
+      if (map[identifier]) continue;
+      regions.push({
+        identifier,
+        latitude: opportunity.latitude,
+        longitude: opportunity.longitude,
+        radius: GEOFENCE_RADIUS_METERS,
+        notifyOnEnter: true,
+        notifyOnExit: false
+      });
+      map[identifier] = {
+        kind: "task-opportunity",
+        companyName: opportunity.companyName,
+        taskTitle: opportunity.taskTitle,
+        taskId: opportunity.taskId,
+        taskCount: opportunity.taskCount
       };
     }
 
