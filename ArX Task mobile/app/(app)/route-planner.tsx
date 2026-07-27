@@ -40,7 +40,14 @@ export default function RoutePlannerScreen() {
   const [errandMatches, setErrandMatches] = useState<ErrandMatch[]>([]);
   const [errandModalVisible, setErrandModalVisible] = useState(false);
 
-  const now = new Date();
+  // `now` bir referans olarak stabil kalmalı: her render'da yeni bir Date, altındaki
+  // useMemo zincirini (todayRouteSourceTasks → todayRoutePlan → corridor →
+  // taskOpportunities, ve fieldTasks) her render'da geçersiz kılar. Dakika taneli
+  // bir anahtar üretip Date'i yalnızca o anahtar değiştiğinde yeniden kuruyoruz —
+  // geciken görev hesabı (getEffectiveTaskStatus) hâlâ dakika hassasiyetinde kalır.
+  const rawNow = new Date();
+  const nowMinuteKey = `${rawNow.getFullYear()}-${rawNow.getMonth()}-${rawNow.getDate()}-${rawNow.getHours()}-${rawNow.getMinutes()}`;
+  const now = useMemo(() => new Date(), [nowMinuteKey]);
   const todayKey = now.toISOString().slice(0, 10);
 
   // Today's open tasks — same source as today.tsx & index.tsx, so all three
