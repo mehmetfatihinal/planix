@@ -24,6 +24,7 @@ import {
 import { persistTaskOpportunities } from "@/lib/geofencing";
 import { todayKeyLocal } from "@/lib/geofence-throttle-state";
 import type { RouteOpportunity } from "@/types/business";
+import { RouteMap } from "@/components/route-map";
 
 export default function RoutePlannerScreen() {
   const router = useRouter();
@@ -282,6 +283,16 @@ export default function RoutePlannerScreen() {
           />
         </View>
         <Text style={styles.sectionHint}>{t("route.onTheWay.subtitle")}</Text>
+        <RouteMap
+          origin={locationState.coords ?? null}
+          stops={todayRoutePlan.stops.map((stop) => ({
+            name: stop.company.name,
+            latitude: stop.company.latitude,
+            longitude: stop.company.longitude
+          }))}
+          opportunities={opportunities}
+          onSelectOpportunity={(id) => setSelectedOpportunityId(id)}
+        />
         {opportunities.length === 0 ? (
           <EmptyState title={t("route.onTheWay.empty")} description={t("route.onTheWay.subtitle")} />
         ) : (
