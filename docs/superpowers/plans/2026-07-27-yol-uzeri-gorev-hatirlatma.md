@@ -1988,9 +1988,15 @@ export function RouteMap({
   const html = useMemo(() => buildHtml(payload), [payload]);
   // Veri değişince WebView'ı yeniden monte et — Leaflet katmanlarını elle
   // güncellemek yerine basit ve hatasız yol.
+  // Anahtar duraklarınn koordinatlarını da içerir: durak sayısı aynı kalıp
+  // firma değiştiğinde de harita tazelenmeli.
   const remountKey = useMemo(
-    () => `${stops.length}:${opportunities.map((item) => item.id).join(",")}`,
-    [opportunities, stops.length]
+    () =>
+      [
+        stops.map((stop) => `${stop.latitude},${stop.longitude}`).join("|"),
+        opportunities.map((item) => item.id).join("|")
+      ].join("#"),
+    [opportunities, stops]
   );
 
   if (!stops.length && !opportunities.length) return null;
@@ -2036,7 +2042,8 @@ const styles = StyleSheet.create({
 
 - [ ] **Step 3: Haritayı ekrana bağla**
 
-`app/(app)/route-planner.tsx` — "Yol üzerinde" kartının içine, başlık satırından sonra ekle:
+`app/(app)/route-planner.tsx` — "Yol üzerinde" kartının içine, `sectionHint` metninden **sonra**
+ve fırsat listesinden **önce** ekle:
 
 ```tsx
         <RouteMap
