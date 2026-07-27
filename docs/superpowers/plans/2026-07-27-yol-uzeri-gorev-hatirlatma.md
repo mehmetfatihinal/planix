@@ -861,12 +861,11 @@ export type StoredTaskOpportunities = {
   items: TaskOpportunity[];
 };
 
+// Boş `items` ANLAMLI bir kayıttır: "değerlendirildi, bir şey çıkmadı".
+// Anahtarı silmek "bugün hiç hesaplanmadı" ile karıştırılmasına yol açar ve
+// rota kaynaklı kaydın gün içinde en-yakın-N ile ezilmesini engelleyemezdik.
 export async function persistTaskOpportunities(payload: StoredTaskOpportunities) {
   try {
-    if (!payload.items.length) {
-      await AsyncStorage.removeItem(TASK_OPPORTUNITIES_KEY);
-      return;
-    }
     await AsyncStorage.setItem(
       TASK_OPPORTUNITIES_KEY,
       JSON.stringify({ ...payload, items: payload.items.slice(0, MAX_TASK_OPPORTUNITY_REGIONS) })
