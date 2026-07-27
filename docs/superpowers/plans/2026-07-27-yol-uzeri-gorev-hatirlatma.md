@@ -1492,7 +1492,7 @@ git commit -m "feat(mobile): rota yokken en yakin acik is firmalarini izle"
 
 **Files:**
 - Modify: `app/(app)/route-planner.tsx:75-159`
-- Modify: `src/lib/app-data-context.tsx` (`fetchRouteErrands` çevresi)
+- Modify: `src/types/business.ts` (Step 1'deki `RouteOpportunity` arayüzü)
 
 **Interfaces:**
 - Consumes: Task 2'den `findTaskOpportunities`, `ON_THE_WAY_BUFFER_METERS`, `MAX_TASK_OPPORTUNITY_REGIONS`; Task 4'ten `persistTaskOpportunities`; mevcut `registerErrandGeofences`
