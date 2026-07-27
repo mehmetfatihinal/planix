@@ -6,6 +6,12 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createRoute } from "@/lib/api";
 import { getToken } from "@/lib/storage";
 import { buildRoutePayloadFromPlan, buildTodayRoutePlan } from "@/lib/today-route";
+import {
+  MAX_OPEN_TASK_SNAPSHOT,
+  MAX_TASK_OPPORTUNITY_REGIONS,
+  taskSortKey,
+  type TaskOpportunity
+} from "@/lib/route-opportunities";
 import type { Company, Task, UserLocationCoordinates } from "@/types/business";
 
 // OS-level geofencing: the operating system monitors the regions in a battery-efficient
@@ -27,6 +33,9 @@ const SELLER_PREFIX = "seller:";
 const ERRAND_PREFIX = "errand:";
 const MAX_REGIONS = 20; // iOS caps simultaneous region monitoring at 20; keep Android consistent.
 const MAX_ERRAND_REGIONS = 8; // Route errands share the post-company budget; cap the nearest few.
+const TASK_OPPORTUNITIES_KEY = "arx:task-opportunities";
+const SYNC_INPUT_KEY = "arx:geofence-sync-input";
+const TASK_OPPORTUNITY_PREFIX = "opp:";
 
 export type GeofenceReminderInput = {
   companyId: string;
@@ -58,11 +67,14 @@ export type SyncGeofencesInput = {
 
 type GeofenceMapEntry =
   | { kind: "company"; companyName: string; taskTitle: string; taskId: string; taskCount: number }
+  | { kind: "task-opportunity"; companyName: string; taskTitle: string; taskId: string; taskCount: number }
   | { kind: "seller"; itemName: string; companyName: string }
   | { kind: "errand"; itemName: string; shopName: string };
 
 // Minimal snapshot persisted during sync so the headless home-exit handler can rebuild
-// today's route without the React tree (same pattern as the geofence lookup map).
+// today's route without the React tree (same pattern as the geofence lookup map). The
+// `tasks` field now holds ALL open tasks with a companyId (see persistAutoRouteInputs
+// below), not just today's — on-the-way opportunities are evaluated regardless of date.
 type AutoRouteInputs = {
   todayKey: string;
   tasks: Array<Pick<Task, "id" | "title" | "companyId" | "dueDate" | "dueTime" | "status">>;
@@ -246,13 +258,19 @@ export async function requestGeofencePermissions(): Promise<{ foreground: boolea
   }
 }
 
-// Persists the minimal inputs the headless home-exit handler needs to rebuild today's route.
+// Headless çıkış işleyicisinin ihtiyaç duyduğu asgari girdiyi saklar.
+// Bugünün görevleri değil, companyId taşıyan TÜM açık görevler saklanır —
+// yol üzeri fırsatlar tarih bağımsız değerlendirilir.
 export async function persistAutoRouteInputs(tasks: Task[], companies: Company[]) {
   try {
-    const todayKey = todayKeyLocal();
+    const openTasks = tasks
+      .filter((task) => task.status !== "done" && Boolean(task.companyId))
+      .sort((left, right) => taskSortKey(left).localeCompare(taskSortKey(right)))
+      .slice(0, MAX_OPEN_TASK_SNAPSHOT);
+
     const inputs: AutoRouteInputs = {
-      todayKey,
-      tasks: tasks.map((task) => ({
+      todayKey: todayKeyLocal(),
+      tasks: openTasks.map((task) => ({
         id: task.id,
         title: task.title,
         companyId: task.companyId,
@@ -304,6 +322,48 @@ async function loadErrandGeofences(): Promise<ErrandGeofenceInput[]> {
   }
 }
 
+// Yol üzeri görev fırsatları. `source: "route"` evden çıkış / manuel rota
+// başlatmadan gelir ve gün içinde veri senkronuyla ezilmez; `source: "nearby"`
+// rota yokken konuma en yakın firmalardan üretilir.
+export type StoredTaskOpportunities = {
+  date: string;
+  source: "route" | "nearby";
+  items: TaskOpportunity[];
+};
+
+export async function persistTaskOpportunities(payload: StoredTaskOpportunities) {
+  try {
+    if (!payload.items.length) {
+      await AsyncStorage.removeItem(TASK_OPPORTUNITIES_KEY);
+      return;
+    }
+    await AsyncStorage.setItem(
+      TASK_OPPORTUNITIES_KEY,
+      JSON.stringify({ ...payload, items: payload.items.slice(0, MAX_TASK_OPPORTUNITY_REGIONS) })
+    );
+  } catch {
+    // Best-effort.
+  }
+}
+
+export async function loadStoredTaskOpportunities(): Promise<StoredTaskOpportunities | null> {
+  try {
+    const raw = await AsyncStorage.getItem(TASK_OPPORTUNITIES_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredTaskOpportunities;
+    return Array.isArray(parsed?.items) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Yalnızca bugüne ait kaydı döner; tarih değişmişse kayıt geçersizdir.
+export async function loadTaskOpportunities(todayKey: string): Promise<TaskOpportunity[]> {
+  const stored = await loadStoredTaskOpportunities();
+  if (!stored || stored.date !== todayKey) return [];
+  return stored.items.slice(0, MAX_TASK_OPPORTUNITY_REGIONS);
+}
+
 // Rebuilds the full geofence set (home + today's task companies + route errands + shopping
 // sellers) within the 20-region OS budget. Priority: home → company reminders → route errands
 // → sellers (errands + sellers share the remaining slots). Persists a lookup map the headless
@@ -311,6 +371,8 @@ async function loadErrandGeofences(): Promise<ErrandGeofenceInput[]> {
 export async function syncGeofences(input: SyncGeofencesInput) {
   if (isExpoGo()) return;
   try {
+    await AsyncStorage.setItem(SYNC_INPUT_KEY, JSON.stringify(input)).catch(() => undefined);
+
     const { companies: reminders, home = null, sellers = [] } = input;
 
     const byCompany = new Map<string, GeofenceReminderInput>();
@@ -418,5 +480,20 @@ export async function syncGeofences(input: SyncGeofencesInput) {
     await Location.startGeofencingAsync(GEOFENCE_TASK, regions);
   } catch {
     // Best-effort — never crash the app over geofencing.
+  }
+}
+
+// Headless uyanmada React ağacı yok; son sync girdisini diskten okuyup bölgeleri
+// yeniden kurar. Fırsat ve errand listeleri kendi depolarından okunduğu için
+// bu çağrı onların en güncel hâlini kullanır.
+export async function resyncGeofences() {
+  try {
+    const raw = await AsyncStorage.getItem(SYNC_INPUT_KEY);
+    if (!raw) return;
+    const input = JSON.parse(raw) as SyncGeofencesInput;
+    if (!input || !Array.isArray(input.companies)) return;
+    await syncGeofences(input);
+  } catch {
+    // Best-effort.
   }
 }
