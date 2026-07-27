@@ -41,6 +41,10 @@ const MAX_ERRAND_REGIONS = 8; // Route errands share the post-company budget; ca
 const TASK_OPPORTUNITIES_KEY = "arx:task-opportunities";
 const SYNC_INPUT_KEY = "arx:geofence-sync-input";
 const TASK_OPPORTUNITY_PREFIX = "opp:";
+// GPS jitter guard for the two-phase home-exit lock: a run that hasn't marked itself
+// completed within this window is assumed abandoned (headless process killed) and a later
+// exit the same day may retry it.
+const AUTO_ROUTE_RETRY_WINDOW_MS = 5 * 60 * 1000;
 
 export type GeofenceReminderInput = {
   companyId: string;
@@ -86,6 +90,17 @@ type AutoRouteInputs = {
   companies: Array<Pick<Company, "id" | "name" | "address" | "latitude" | "longitude">>;
 };
 
+// Two-phase lock for the once-a-day home-exit run, stored at AUTO_ROUTE_DATE_KEY. A record
+// with `completed: false` means a run for `day` started at `startedAt` but hasn't finished —
+// either it's still in flight (GPS acquisition, the errand fetch) or the headless process was
+// killed before reaching the summary notification. `AUTO_ROUTE_RETRY_WINDOW_MS` after
+// `startedAt`, an incomplete run is treated as abandoned and may be retried the same day.
+type AutoRouteLockRecord = {
+  day: string;
+  startedAt: number;
+  completed: boolean;
+};
+
 function isExpoGo() {
   return Constants.appOwnership === "expo";
 }
@@ -121,8 +136,20 @@ async function sendLocalNotification(title: string, body: string, data: Record<s
   const notifications = getNotificationsModule();
   if (!notifications?.scheduleNotificationAsync) return;
   await ensureAndroidChannel(notifications);
+  // "geofence-reminder" only has a "Bugün sorma" action, and that action's handler is a
+  // no-op unless `data.regionId` is present (see notifications.ts). Attaching the category
+  // to a notification without a regionId (e.g. the home-exit summary) would show a button
+  // that does nothing when tapped, so the key is included only when it will actually work —
+  // built via spread so it is entirely absent otherwise, not present-but-undefined.
+  const hasRegionId = typeof data.regionId === "string" && data.regionId.length > 0;
   await notifications.scheduleNotificationAsync({
-    content: { title, body, sound: "default", data, categoryIdentifier: "geofence-reminder" },
+    content: {
+      title,
+      body,
+      sound: "default",
+      data,
+      ...(hasRegionId ? { categoryIdentifier: "geofence-reminder" } : {})
+    },
     // Immediate on iOS; a ~half-second date trigger on Android so it lands on the heads-up channel.
     trigger:
       Platform.OS === "android"
@@ -218,15 +245,53 @@ TaskManager.defineTask(GEOFENCE_TASK, async (body: any) => {
   }
 });
 
+// Never throws: an unreadable value, or a legacy bare-date-string value written by a
+// previous build (pre-two-phase lock), is treated as "no record for today" so the handler
+// can never be permanently wedged by a malformed or outdated stored value.
+async function readAutoRouteLock(): Promise<AutoRouteLockRecord | null> {
+  try {
+    const raw = await AsyncStorage.getItem(AUTO_ROUTE_DATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.day === "string" &&
+      typeof parsed.startedAt === "number" &&
+      typeof parsed.completed === "boolean"
+    ) {
+      return parsed as AutoRouteLockRecord;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeAutoRouteLock(record: AutoRouteLockRecord) {
+  await AsyncStorage.setItem(AUTO_ROUTE_DATE_KEY, JSON.stringify(record)).catch(() => undefined);
+}
+
 // R15 — home-exit auto route. Runs headlessly at most once per day: rebuilds today's
 // route plan from the inputs persisted during sync, saves it server-side with source
 // "auto-home-exit", hesaplar yol üzeri fırsatları (görevler yerel, alışveriş sunucudan)
 // ve tek bir özet bildirimle haber verir.
+//
+// Two-phase lock: a bare "started" record is written before any work so a same-day re-entry
+// while a run is in flight is a no-op, but if the headless process is killed before the run
+// finishes (GPS acquisition + up to an 8s errand timeout is a real risk), the record is only
+// "completed" once a notification has actually gone out — an exit more than
+// AUTO_ROUTE_RETRY_WINDOW_MS later the same day is allowed to retry instead of losing the
+// whole day.
 async function handleHomeExit() {
   const today = todayKeyLocal();
-  const lastRun = await AsyncStorage.getItem(AUTO_ROUTE_DATE_KEY).catch(() => null);
-  if (lastRun === today) return;
-  await AsyncStorage.setItem(AUTO_ROUTE_DATE_KEY, today).catch(() => undefined);
+  const lock = await readAutoRouteLock();
+  if (lock && lock.day === today) {
+    if (lock.completed) return;
+    if (Date.now() - lock.startedAt < AUTO_ROUTE_RETRY_WINDOW_MS) return;
+  }
+  const startedAt = Date.now();
+  await writeAutoRouteLock({ day: today, startedAt, completed: false });
 
   try {
     const raw = await AsyncStorage.getItem(AUTO_ROUTE_INPUTS_KEY);
@@ -322,10 +387,14 @@ async function handleHomeExit() {
       url: plan.stops.length ? "/route-planner" : "/today",
       autoRoute: true
     });
+    await writeAutoRouteLock({ day: today, startedAt, completed: true });
   } catch {
     await sendLocalNotification("Günaydın!", "Bugün planlı göreviniz yok.", { url: "/today" }).catch(
       () => undefined
     );
+    // Mark completed even on the fallback path so a persistently-failing day isn't retried
+    // in a loop every time the user steps in and out of the home region.
+    await writeAutoRouteLock({ day: today, startedAt, completed: true });
   }
 }
 
