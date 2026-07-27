@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   acknowledgeTask as acknowledgeTaskRequest,
@@ -54,8 +54,17 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { syncHabitReminders, syncLocalTaskReminders } from "@/lib/notifications";
-import { persistAutoRouteInputs, persistErrandGeofences, syncGeofences, type ErrandGeofenceInput } from "@/lib/geofencing";
+import {
+  loadStoredTaskOpportunities,
+  persistAutoRouteInputs,
+  persistErrandGeofences,
+  persistTaskOpportunities,
+  syncGeofences,
+  type ErrandGeofenceInput
+} from "@/lib/geofencing";
 import { hasUsableCoordinates } from "@/lib/location";
+import { useUserLocation } from "@/lib/location-context";
+import { findTaskOpportunities, MAX_TASK_OPPORTUNITY_REGIONS } from "@/lib/route-opportunities";
 import { captureAndUploadTaskPhoto } from "@/lib/task-photo";
 import {
   normalizeCompany,
@@ -167,6 +176,14 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [isFromCache, setIsFromCache] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [lastCapture, setLastCapture] = useState<AiCaptureResponse | null>(null);
+
+  const { state: userLocationState } = useUserLocation();
+  // Ref: konum değişimi rebuildGeofences'ı yeniden tetiklemesin, ama en güncel
+  // değeri okuyabilelim.
+  const locationRef = useRef(userLocationState.coords);
+  useEffect(() => {
+    locationRef.current = userLocationState.coords;
+  }, [userLocationState.coords]);
 
   const persistSnapshot = (snapshot: AppData) => {
     AsyncStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify(snapshot)).catch(() => undefined);
@@ -315,6 +332,28 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     }));
 
     await persistAutoRouteInputs(todayTasks, data.companies).catch(() => undefined);
+
+    // Rota kaynaklı fırsat listesi bugüne aitse dokunma — o sabah kurulan liste
+    // gün içindeki veri senkronuyla ezilmemeli. Aksi hâlde rota yokken konuma
+    // en yakın açık iş firmalarını izlemeye al (üst mesafe sınırı yok).
+    const storedOpportunities = await loadStoredTaskOpportunities().catch(() => null);
+    const hasRouteOpportunities = storedOpportunities?.date === todayKey && storedOpportunities.source === "route";
+    if (!hasRouteOpportunities) {
+      const origin = locationRef.current;
+      const nearby = origin
+        ? findTaskOpportunities({
+            tasks: data.tasks.filter((task) => task.status !== "done" && Boolean(task.companyId)),
+            companies: data.companies,
+            corridor: [origin],
+            bufferMeters: null,
+            excludeCompanyIds: Array.from(groups.keys()),
+            limit: MAX_TASK_OPPORTUNITY_REGIONS
+          })
+        : [];
+      await persistTaskOpportunities({ date: todayKey, source: "nearby", items: nearby }).catch(
+        () => undefined
+      );
+    }
 
     const sellers = token
       ? await listShoppingSellers(token)
