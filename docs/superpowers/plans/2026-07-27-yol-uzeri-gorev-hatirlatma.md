@@ -1075,6 +1075,12 @@ git commit -m "feat(mobile): bildirimlere Bugun sorma eylemi"
   });
 ```
 
+> **Uygulama sırasında değişti (Task 7 incelemesi):** `categoryIdentifier` koşulsuz eklenince
+> evden çıkış özet bildiriminde de "Bugün sorma" düğmesi çıkıyor, ama o bildirim `regionId`
+> taşımadığı için düğme hiçbir şey yapmıyor. Karar: kategori **yalnızca `data.regionId` varken**
+> eklenir. Yaklaşınca gelen dört geofence bildirimi düğmeyi korur, özet bildirimleri göstermez.
+> Nihai hâli için `src/lib/geofencing.ts` içindeki `sendLocalNotification`'a bak.
+
 - [ ] **Step 2: İşleyiciye throttle kapısı ve yeni türü ekle**
 
 `src/lib/geofencing.ts` import bloğuna ekle:
@@ -1355,6 +1361,16 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
   ]);
 }
 ```
+
+> **Uygulama sırasında değişti (Task 7 incelemesi):** günde-bir kilidini işten **önce** yazmak,
+> headless süreç ortada öldürülürse (GPS beklemesi + 8 sn ağ zaman aşımı üst üste bindiğinde
+> gerçek bir risk) o günü tamamen sessiz bırakıyordu — aynı gün ikinci çıkışta bile tekrar
+> denenmiyordu. Karar: **iki aşamalı kilit.** `AUTO_ROUTE_DATE_KEY` artık düz tarih dizgisi
+> değil, `{gün, başlangıçZamanı, tamamlandı}` kaydı tutar. Bugün için tamamlanmışsa çıkılır;
+> başlamış ama 5 dakikadan eskiyse yeniden denenir (5 dk penceresi GPS titremesine karşı);
+> aksi hâlde yeni bir "başladı" kaydı yazılıp devam edilir. Özet bildirimi gönderildikten sonra
+> — fallback yolu dâhil — kayıt "tamamlandı" olarak güncellenir. Eski sürümden kalan düz tarih
+> dizgisi "bugüne ait kayıt yok" sayılır. Nihai hâli için `handleHomeExit`'e bak.
 
 - [ ] **Step 3: Tip kontrolü**
 
