@@ -382,6 +382,22 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     rebuildGeofences().catch(() => undefined);
   }, [rebuildGeofences]);
 
+  // Açılışta GPS henüz yokken çalışan ilk rebuild, o günün "nearby" kaydını boş
+  // yazmış olabilir ve konum sonradan gelse bile hiçbir şey onu düzeltmez (veri
+  // değişmediği sürece rebuildGeofences yeniden tetiklenmez). Konum İLK KEZ
+  // mevcut olduğunda tam olarak bir kez daha yeniden hesapla. Bayrak bir ref'te
+  // tutulur — konum dependency array'e eklenmez — böylece sonraki her GPS
+  // güncellemesi bu efekti yeniden tetiklemez. locationRef.current, yukarıdaki
+  // senkronizasyon efekti (aynı render'da daha önce bildirilmiş) tarafından bu
+  // efekt çalışmadan önce zaten güncellenmiş olur, böylece rebuildGeofences bayat
+  // (stale) değeri değil taze konumu okur.
+  const hasTriggeredLocationRebuildRef = useRef(false);
+  useEffect(() => {
+    if (hasTriggeredLocationRebuildRef.current || !userLocationState.coords) return;
+    hasTriggeredLocationRebuildRef.current = true;
+    rebuildGeofences().catch(() => undefined);
+  }, [userLocationState.coords, rebuildGeofences]);
+
   const value = useMemo<AppDataContextValue>(
     () => ({
       data,
