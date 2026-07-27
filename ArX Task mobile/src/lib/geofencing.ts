@@ -3,14 +3,18 @@ import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import Constants from "expo-constants";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createRoute } from "@/lib/api";
+import { createRoute, routeErrandStops } from "@/lib/api";
 import { getToken } from "@/lib/storage";
 import { buildRoutePayloadFromPlan, buildTodayRoutePlan } from "@/lib/today-route";
 import { markNotified, shouldNotify } from "@/lib/geofence-throttle";
 import {
+  buildDepartureSummary,
+  findTaskOpportunities,
   MAX_OPEN_TASK_SNAPSHOT,
   MAX_TASK_OPPORTUNITY_REGIONS,
+  ON_THE_WAY_BUFFER_METERS,
   taskSortKey,
+  type Corridor,
   type TaskOpportunity
 } from "@/lib/route-opportunities";
 import type { Company, Task, UserLocationCoordinates } from "@/types/business";
@@ -216,7 +220,8 @@ TaskManager.defineTask(GEOFENCE_TASK, async (body: any) => {
 
 // R15 — home-exit auto route. Runs headlessly at most once per day: rebuilds today's
 // route plan from the inputs persisted during sync, saves it server-side with source
-// "auto-home-exit" and notifies with a deep link into the route planner.
+// "auto-home-exit", hesaplar yol üzeri fırsatları (görevler yerel, alışveriş sunucudan)
+// ve tek bir özet bildirimle haber verir.
 async function handleHomeExit() {
   const today = todayKeyLocal();
   const lastRun = await AsyncStorage.getItem(AUTO_ROUTE_DATE_KEY).catch(() => null);
@@ -226,11 +231,8 @@ async function handleHomeExit() {
   try {
     const raw = await AsyncStorage.getItem(AUTO_ROUTE_INPUTS_KEY);
     const inputs = raw ? (JSON.parse(raw) as AutoRouteInputs) : null;
-    const todayTasks = (inputs?.tasks ?? []).filter((task) => task.dueDate === today && task.status !== "done");
-    if (!inputs || todayTasks.length === 0) {
-      await sendLocalNotification("Günaydın!", "Bugün planlı göreviniz yok.", { url: "/today" });
-      return;
-    }
+    const openTasks = inputs?.tasks ?? [];
+    const companies = inputs?.companies ?? [];
 
     let origin: UserLocationCoordinates | null = null;
     try {
@@ -243,31 +245,96 @@ async function handleHomeExit() {
       }
     }
 
+    const todayTasks = openTasks.filter((task) => task.dueDate === today && task.status !== "done");
     const plan = buildTodayRoutePlan(
       todayTasks as unknown as Task[],
-      inputs.companies as unknown as Company[],
+      companies as unknown as Company[],
       origin
     );
 
-    if (!plan.stops.length) {
-      await sendLocalNotification("Günaydın!", "Bugün planlı göreviniz yok.", { url: "/today" });
-      return;
-    }
-
     const token = await getToken().catch(() => null);
-    if (token) {
+    if (plan.stops.length && token) {
       const payload = buildRoutePayloadFromPlan(plan, origin, today, "auto-home-exit");
       await createRoute(token, { ...payload, status: "planned" }).catch(() => undefined);
     }
 
-    await sendLocalNotification(
-      "Günaydın! Bugünkü rotanız hazır",
-      `Bugünkü rotanız hazır — ${plan.stops.length} durak`,
-      { url: "/route-planner", autoRoute: true }
-    );
+    // Koridor: rota varsa [konum, ...duraklar], yoksa [konum].
+    const corridor: Corridor = [];
+    if (origin) corridor.push(origin);
+    for (const stop of plan.stops) {
+      if (hasCoords(stop.company.latitude, stop.company.longitude)) {
+        corridor.push({ latitude: stop.company.latitude, longitude: stop.company.longitude });
+      }
+    }
+
+    // Bugünün görev firmaları ve rota durakları hariç: onların kendi bildirimi var.
+    const excludeCompanyIds = [
+      ...plan.stops.map((stop) => stop.company.id),
+      ...todayTasks.map((task) => task.companyId).filter((id): id is string => Boolean(id))
+    ];
+
+    const opportunities: TaskOpportunity[] = corridor.length
+      ? findTaskOpportunities({
+          tasks: openTasks,
+          companies,
+          corridor,
+          bufferMeters: corridor.length > 1 ? ON_THE_WAY_BUFFER_METERS : null,
+          excludeCompanyIds,
+          limit: MAX_TASK_OPPORTUNITY_REGIONS
+        })
+      : [];
+
+    await persistTaskOpportunities({ date: today, source: "route", items: opportunities });
+
+    // Alışveriş fırsatları — best-effort, ağ yoksa özet yalnızca görev kısmıyla gider.
+    let errandCount = 0;
+    if (token && corridor.length) {
+      try {
+        const response = await withTimeout(
+          routeErrandStops(token, { coords: corridor.map((point) => [point.latitude, point.longitude]) }),
+          8000
+        );
+        const matches = response?.matches ?? [];
+        errandCount = matches.length;
+        await persistErrandGeofences(
+          matches.map((match) => ({
+            itemId: match.itemId,
+            itemName: match.itemName,
+            companyId: `${ERRAND_PREFIX}${match.itemId}:${match.latitude},${match.longitude}`,
+            companyName: match.shopName,
+            latitude: match.latitude,
+            longitude: match.longitude
+          }))
+        );
+      } catch {
+        // Ağ/zaman aşımı — alışveriş kısmı atlanır.
+      }
+    }
+
+    await resyncGeofences();
+
+    const summary = buildDepartureSummary({
+      stopCount: plan.stops.length,
+      taskOpportunityCount: opportunities.length,
+      errandCount
+    });
+    await sendLocalNotification(summary.title, summary.body, {
+      url: plan.stops.length ? "/route-planner" : "/today",
+      autoRoute: true
+    });
   } catch {
-    await sendLocalNotification("Günaydın!", "Bugün planlı göreviniz yok.", { url: "/today" }).catch(() => undefined);
+    await sendLocalNotification("Günaydın!", "Bugün planlı göreviniz yok.", { url: "/today" }).catch(
+      () => undefined
+    );
   }
+}
+
+// Headless görevin OS tarafından öldürülmemesi için ağ çağrılarına üst sınır.
+function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), milliseconds))
+  ]);
 }
 
 // Requests foreground THEN background ("Allow all the time") location permission. Background
