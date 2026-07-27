@@ -66,3 +66,6 @@ ios/
 # === Ekran görüntüleri / geçici çıktılar (isteğe bağlı) ===
 mobile-screen.png
 apk-build.log
+
+# === SDD çalışma alanı (git-ignored scratch) ===
+.superpowers/
