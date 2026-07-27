@@ -331,12 +331,13 @@ export type StoredTaskOpportunities = {
   items: TaskOpportunity[];
 };
 
+// Always persists the record, even when `items` is empty — an empty array means "evaluated
+// today, found nothing", which is a meaningful fact distinct from "nothing persisted today".
+// Callers (e.g. the nearby fallback) rely on this to tell apart an already-run route
+// evaluation from a day with no record at all, so a route-sourced record isn't overwritten
+// by a nearby-sourced one later the same day.
 export async function persistTaskOpportunities(payload: StoredTaskOpportunities) {
   try {
-    if (!payload.items.length) {
-      await AsyncStorage.removeItem(TASK_OPPORTUNITIES_KEY);
-      return;
-    }
     await AsyncStorage.setItem(
       TASK_OPPORTUNITIES_KEY,
       JSON.stringify({ ...payload, items: payload.items.slice(0, MAX_TASK_OPPORTUNITY_REGIONS) })
