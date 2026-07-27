@@ -15,6 +15,14 @@ import { canRouteToCompany, formatDistanceLabel, hasUsableCoordinates, openCompa
 import { useUserLocation } from "@/lib/location-context";
 import { buildRoutePayloadFromPlan, buildTodayRoutePlan, describeRouteExclusion } from "@/lib/today-route";
 import type { ErrandMatch, RoutePlan, UserLocationCoordinates } from "@/types/business";
+import {
+  findTaskOpportunities,
+  MAX_TASK_OPPORTUNITY_REGIONS,
+  ON_THE_WAY_BUFFER_METERS
+} from "@/lib/route-opportunities";
+import { persistTaskOpportunities } from "@/lib/geofencing";
+import { todayKeyLocal } from "@/lib/geofence-throttle-state";
+import type { RouteOpportunity } from "@/types/business";
 
 export default function RoutePlannerScreen() {
   const router = useRouter();
@@ -49,6 +57,58 @@ export default function RoutePlannerScreen() {
     [data.companies, locationState.coords, todayRouteSourceTasks]
   );
 
+  // Koridor: konum + bugünün durakları. Konum yoksa yalnızca duraklardan kurulur.
+  const corridor = useMemo(() => {
+    const points: Array<{ latitude: number; longitude: number }> = [];
+    if (locationState.coords) points.push(locationState.coords);
+    for (const stop of todayRoutePlan.stops) {
+      if (hasUsableCoordinates(stop.company)) {
+        points.push({ latitude: stop.company.latitude, longitude: stop.company.longitude });
+      }
+    }
+    return points;
+  }, [locationState.coords, todayRoutePlan.stops]);
+
+  // Görev fırsatları tamamen yerel — ağ beklemeden anında hazır.
+  const taskOpportunities = useMemo(() => {
+    if (!corridor.length) return [];
+    return findTaskOpportunities({
+      tasks: data.tasks.filter((task) => task.status !== "done" && Boolean(task.companyId)),
+      companies: data.companies,
+      corridor,
+      bufferMeters: corridor.length > 1 ? ON_THE_WAY_BUFFER_METERS : null,
+      excludeCompanyIds: [
+        ...todayRoutePlan.stops.map((stop) => stop.company.id),
+        ...todayRouteSourceTasks.map((task) => task.companyId).filter((id): id is string => Boolean(id))
+      ],
+      limit: MAX_TASK_OPPORTUNITY_REGIONS
+    });
+  }, [corridor, data.companies, data.tasks, todayRoutePlan.stops, todayRouteSourceTasks]);
+
+  const opportunities = useMemo<RouteOpportunity[]>(() => {
+    const taskRows: RouteOpportunity[] = taskOpportunities.map((item) => ({
+      id: `task:${item.companyId}`,
+      kind: "task",
+      title: item.companyName,
+      subtitle: item.taskCount > 1 ? `${item.taskCount} açık iş` : item.taskTitle,
+      latitude: item.latitude,
+      longitude: item.longitude,
+      distanceMeters: item.distanceToRouteMeters,
+      companyId: item.companyId,
+      taskId: item.taskId
+    }));
+    const errandRows: RouteOpportunity[] = errandMatches.map((match) => ({
+      id: `errand:${match.itemId}:${match.latitude},${match.longitude}`,
+      kind: "errand",
+      title: match.shopName,
+      subtitle: match.itemName,
+      latitude: match.latitude,
+      longitude: match.longitude,
+      distanceMeters: match.distanceToRouteMeters
+    }));
+    return [...taskRows, ...errandRows];
+  }, [errandMatches, taskOpportunities]);
+
   // Field tasks pool (the candidate list shown below the route) — open and
   // route-shaped (visits/installation/support/measurements/delivery).
   const fieldTasks = useMemo(
@@ -72,12 +132,17 @@ export default function RoutePlannerScreen() {
       return leftDate.localeCompare(rightDate);
     })[0]?.dueTime ?? null;
 
-  // Errands along the route corridor. Non-blocking (never delays opening Google Maps): builds
-  // the ordered corridor [current location, ...stops], asks the API for shops on the way, then
-  // shows the "yola çıkmadan önce" summary AND registers them as en-route geofences. Degrades
-  // gracefully when location permission is denied (sends stop coords only).
-  async function loadErrandOpportunities(origin: UserLocationCoordinates | null) {
+  // Rota başlatıldığında: görev fırsatları (yerel, anında) diske yazılır ve
+  // geofence olarak kurulur; alışveriş dükkanları ağdan gelir ve Google Maps'i
+  // hiçbir koşulda geciktirmez.
+  async function loadRouteOpportunities(origin: UserLocationCoordinates | null) {
     try {
+      // Depoyu okuyan taraf (geofencing.ts) YEREL gün anahtarı kullanıyor; buradaki
+      // ekran içi `todayKey` ise UTC tabanlı. Aynı saf yardımcıyı kullanarak gece
+      // yarısından sonra fırsatların sessizce düşmesini engelliyoruz.
+      const localTodayKey = todayKeyLocal(new Date());
+      await persistTaskOpportunities({ date: localTodayKey, source: "route", items: taskOpportunities });
+
       const coords: Array<[number, number]> = [];
       if (origin) coords.push([origin.latitude, origin.longitude]);
       for (const stop of todayRoutePlan.stops) {
@@ -87,8 +152,6 @@ export default function RoutePlannerScreen() {
       if (!coords.length) return;
 
       const matches = await fetchRouteErrands(coords);
-
-      // Map matches → geofence inputs (nearest-first from the API; syncGeofences caps to ~8).
       const errands: ErrandGeofenceInput[] = matches.map((match) => ({
         itemId: match.itemId,
         itemName: match.itemName,
@@ -97,7 +160,6 @@ export default function RoutePlannerScreen() {
         latitude: match.latitude,
         longitude: match.longitude
       }));
-      // Registers the shops (or clears a previous route's when empty).
       await registerErrandGeofences(errands);
 
       if (matches.length) {
@@ -105,7 +167,7 @@ export default function RoutePlannerScreen() {
         setErrandModalVisible(true);
       }
     } catch {
-      // Best-effort — the errand opportunity must never break route start.
+      // Best-effort — fırsat kontrolü rota başlatmayı asla bozmamalı.
     }
   }
 
@@ -143,7 +205,7 @@ export default function RoutePlannerScreen() {
       }
 
       // Kick off the along-the-route errand check in parallel — must not delay navigation.
-      void loadErrandOpportunities(nextCoords ?? null);
+      void loadRouteOpportunities(nextCoords ?? null);
 
       await openMultiCompanyRoute(todayRoutePlan.stops.map((stop) => stop.company), nextCoords ?? null);
 

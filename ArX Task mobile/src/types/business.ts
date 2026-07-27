@@ -503,3 +503,17 @@ export interface UserLocationState {
   updatedAt: string | null;
   error: string | null;
 }
+
+// Rota planı ekranında görev ve alışveriş fırsatlarını tek listede göstermek için
+// kullanılan görünüm modeli.
+export interface RouteOpportunity {
+  id: string;
+  kind: "task" | "errand";
+  title: string;      // yer adı (firma / dükkan)
+  subtitle: string;   // iş başlığı veya alınacak madde
+  latitude: number;
+  longitude: number;
+  distanceMeters: number;
+  companyId?: string;
+  taskId?: string;
+}
