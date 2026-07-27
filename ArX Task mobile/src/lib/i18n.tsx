@@ -71,7 +71,17 @@ const translations: Record<LanguageCode, Dictionary> = {
     "route.errands.title": "Errands along the route",
     "route.errands.subtitle": "Shops on your way",
     "route.errands.onTheWay": "on the way",
-    "route.errands.close": "Close"
+    "route.errands.close": "Close",
+    "route.onTheWay.title": "On the way",
+    "route.onTheWay.subtitle": "Open work and errands along today's route",
+    "route.onTheWay.tasks": "Work",
+    "route.onTheWay.errands": "Shopping",
+    "route.onTheWay.empty": "Nothing extra along the route",
+    "route.onTheWay.offRoute": "off route",
+    "route.onTheWay.directions": "Directions",
+    "route.onTheWay.addToRoute": "Add to route",
+    "route.onTheWay.muteToday": "Mute for today",
+    "route.onTheWay.routeFull": "Route is full — Google Maps allows 10 stops at most."
   },
   de: {
     "app.brand": "Planix",
@@ -138,7 +148,17 @@ const translations: Record<LanguageCode, Dictionary> = {
     "route.errands.title": "Einkäufe entlang der Route",
     "route.errands.subtitle": "Geschäfte auf deinem Weg",
     "route.errands.onTheWay": "unterwegs",
-    "route.errands.close": "Schließen"
+    "route.errands.close": "Schließen",
+    "route.onTheWay.title": "Unterwegs",
+    "route.onTheWay.subtitle": "Offene Arbeiten und Einkäufe entlang der heutigen Route",
+    "route.onTheWay.tasks": "Arbeiten",
+    "route.onTheWay.errands": "Einkauf",
+    "route.onTheWay.empty": "Nichts Zusätzliches entlang der Route",
+    "route.onTheWay.offRoute": "abseits der Route",
+    "route.onTheWay.directions": "Route",
+    "route.onTheWay.addToRoute": "Zur Route hinzufügen",
+    "route.onTheWay.muteToday": "Heute nicht mehr",
+    "route.onTheWay.routeFull": "Route ist voll — Google Maps erlaubt höchstens 10 Stopps."
   },
   tr: {
     "app.brand": "Planix",
@@ -205,7 +225,17 @@ const translations: Record<LanguageCode, Dictionary> = {
     "route.errands.title": "Yol üzeri alışveriş",
     "route.errands.subtitle": "Yolun üzerindeki dükkanlar",
     "route.errands.onTheWay": "yolun üzerinde",
-    "route.errands.close": "Kapat"
+    "route.errands.close": "Kapat",
+    "route.onTheWay.title": "Yol üzerinde",
+    "route.onTheWay.subtitle": "Bugünkü rotanın üzerindeki açık işler ve alışverişler",
+    "route.onTheWay.tasks": "İşler",
+    "route.onTheWay.errands": "Alışveriş",
+    "route.onTheWay.empty": "Yol üzerinde ek iş yok",
+    "route.onTheWay.offRoute": "rotadan sapma",
+    "route.onTheWay.directions": "Yol tarifi",
+    "route.onTheWay.addToRoute": "Rotaya ekle",
+    "route.onTheWay.muteToday": "Bugün sorma",
+    "route.onTheWay.routeFull": "Rota dolu — Google Maps en fazla 10 durak alıyor."
   },
   ar: {
     "app.brand": "Planix",
@@ -272,7 +302,17 @@ const translations: Record<LanguageCode, Dictionary> = {
     "route.errands.title": "مشاوير على طول الطريق",
     "route.errands.subtitle": "متاجر على طريقك",
     "route.errands.onTheWay": "على الطريق",
-    "route.errands.close": "إغلاق"
+    "route.errands.close": "إغلاق",
+    "route.onTheWay.title": "على الطريق",
+    "route.onTheWay.subtitle": "المهام المفتوحة والمشاوير على طريق اليوم",
+    "route.onTheWay.tasks": "المهام",
+    "route.onTheWay.errands": "التسوق",
+    "route.onTheWay.empty": "لا يوجد شيء إضافي على الطريق",
+    "route.onTheWay.offRoute": "خارج الطريق",
+    "route.onTheWay.directions": "الاتجاهات",
+    "route.onTheWay.addToRoute": "أضف إلى المسار",
+    "route.onTheWay.muteToday": "لا تسأل اليوم",
+    "route.onTheWay.routeFull": "المسار ممتلئ — خرائط جوجل تسمح بـ 10 محطات كحد أقصى."
   },
   fr: {
     "app.brand": "Planix",
@@ -339,7 +379,17 @@ const translations: Record<LanguageCode, Dictionary> = {
     "route.errands.title": "Courses sur le trajet",
     "route.errands.subtitle": "Commerces sur ton chemin",
     "route.errands.onTheWay": "sur le trajet",
-    "route.errands.close": "Fermer"
+    "route.errands.close": "Fermer",
+    "route.onTheWay.title": "Sur le trajet",
+    "route.onTheWay.subtitle": "Travaux ouverts et courses sur le trajet du jour",
+    "route.onTheWay.tasks": "Travaux",
+    "route.onTheWay.errands": "Courses",
+    "route.onTheWay.empty": "Rien de plus sur le trajet",
+    "route.onTheWay.offRoute": "hors trajet",
+    "route.onTheWay.directions": "Itinéraire",
+    "route.onTheWay.addToRoute": "Ajouter au trajet",
+    "route.onTheWay.muteToday": "Ne plus demander aujourd'hui",
+    "route.onTheWay.routeFull": "Trajet complet — Google Maps accepte 10 arrêts au maximum."
   },
   nl: {
     "app.brand": "Planix",
@@ -406,7 +456,17 @@ const translations: Record<LanguageCode, Dictionary> = {
     "route.errands.title": "Boodschappen onderweg",
     "route.errands.subtitle": "Winkels op je route",
     "route.errands.onTheWay": "onderweg",
-    "route.errands.close": "Sluiten"
+    "route.errands.close": "Sluiten",
+    "route.onTheWay.title": "Onderweg",
+    "route.onTheWay.subtitle": "Openstaand werk en boodschappen op de route van vandaag",
+    "route.onTheWay.tasks": "Werk",
+    "route.onTheWay.errands": "Boodschappen",
+    "route.onTheWay.empty": "Niets extra's op de route",
+    "route.onTheWay.offRoute": "van de route",
+    "route.onTheWay.directions": "Route",
+    "route.onTheWay.addToRoute": "Aan route toevoegen",
+    "route.onTheWay.muteToday": "Vandaag niet meer",
+    "route.onTheWay.routeFull": "Route is vol — Google Maps staat maximaal 10 stops toe."
   }
 };
 

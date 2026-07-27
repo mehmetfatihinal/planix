@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { AppHeader } from "@/components/app-header";
 import { Card, Chip, EmptyState, PrimaryButton, Screen, StatTile, colors } from "@/components/ui";
+import { SheetModal } from "@/components/sheet-modal";
 import { TaskCard } from "@/components/task-card";
 import { createRoute, markRouteStopVisited, startRoute } from "@/lib/api";
 import { useAppData } from "@/lib/app-data-context";
@@ -38,7 +39,7 @@ export default function RoutePlannerScreen() {
   const [visitingStopId, setVisitingStopId] = useState<string | null>(null);
   // "Yola çıkmadan önce" — shops on the way that sell an open shopping-list errand.
   const [errandMatches, setErrandMatches] = useState<ErrandMatch[]>([]);
-  const [errandModalVisible, setErrandModalVisible] = useState(false);
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState<string | null>(null);
 
   // `now` bir referans olarak stabil kalmalı: her render'da yeni bir Date, altındaki
   // useMemo zincirini (todayRouteSourceTasks → todayRoutePlan → corridor →
@@ -116,6 +117,8 @@ export default function RoutePlannerScreen() {
     return [...taskRows, ...errandRows];
   }, [errandMatches, taskOpportunities]);
 
+  const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId) ?? null;
+
   // Field tasks pool (the candidate list shown below the route) — open and
   // route-shaped (visits/installation/support/measurements/delivery).
   const fieldTasks = useMemo(
@@ -171,7 +174,6 @@ export default function RoutePlannerScreen() {
 
       if (matches.length) {
         setErrandMatches(matches);
-        setErrandModalVisible(true);
       }
     } catch {
       // Best-effort — fırsat kontrolü rota başlatmayı asla bozmamalı.
@@ -269,6 +271,42 @@ export default function RoutePlannerScreen() {
           onPress={() => void handleStartTodayRoute()}
           disabled={!todayRoutePlan.stops.length}
         />
+      </Card>
+
+      <Card>
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionTitle}>{t("route.onTheWay.title")}</Text>
+          <Chip
+            label={`${opportunities.length}`}
+            tone={opportunities.length ? "success" : "default"}
+          />
+        </View>
+        <Text style={styles.sectionHint}>{t("route.onTheWay.subtitle")}</Text>
+        {opportunities.length === 0 ? (
+          <EmptyState title={t("route.onTheWay.empty")} description={t("route.onTheWay.subtitle")} />
+        ) : (
+          opportunities.map((item) => (
+            <Pressable key={item.id} onPress={() => setSelectedOpportunityId(item.id)} style={styles.errandRow}>
+              <View style={styles.errandIcon}>
+                <Feather
+                  name={item.kind === "task" ? "briefcase" : "shopping-bag"}
+                  size={16}
+                  color={colors.primaryDark}
+                />
+              </View>
+              <View style={styles.errandCopy}>
+                <Text style={styles.errandTitle}>
+                  {item.title} — {item.subtitle}
+                </Text>
+                <Text style={styles.errandMeta}>
+                  {t(item.kind === "task" ? "route.onTheWay.tasks" : "route.onTheWay.errands")} ·{" "}
+                  {formatDistanceLabel(item.distanceMeters) ?? "?"} {t("route.onTheWay.offRoute")}
+                </Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.subtle} />
+            </Pressable>
+          ))
+        )}
       </Card>
 
       <Card>
@@ -403,37 +441,16 @@ export default function RoutePlannerScreen() {
         )}
       </Card>
 
-      <Modal
-        visible={errandModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setErrandModalVisible(false)}
+      <SheetModal
+        visible={Boolean(selectedOpportunity)}
+        title={selectedOpportunity?.title ?? ""}
+        subtitle={selectedOpportunity?.subtitle}
+        onClose={() => setSelectedOpportunityId(null)}
       >
-        <Pressable style={styles.modalBackdrop} onPress={() => setErrandModalVisible(false)}>
-          <Pressable style={styles.modalCard} onPress={() => undefined}>
-            <Text style={styles.modalTitle}>{t("route.errands.title")}</Text>
-            <Text style={styles.modalSubtitle}>{t("route.errands.subtitle")}</Text>
-            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-              {errandMatches.map((match) => (
-                <View key={`${match.itemId}:${match.latitude},${match.longitude}`} style={styles.errandRow}>
-                  <View style={styles.errandIcon}>
-                    <Feather name="shopping-bag" size={16} color={colors.primaryDark} />
-                  </View>
-                  <View style={styles.errandCopy}>
-                    <Text style={styles.errandTitle}>
-                      {match.shopName} — {match.itemName}
-                    </Text>
-                    <Text style={styles.errandMeta}>
-                      {t("route.errands.onTheWay")} · ~{formatDistanceLabel(match.distanceToRouteMeters) ?? "?"}
-                    </Text>
-                  </View>
-                </View>
-              ))}
-            </ScrollView>
-            <PrimaryButton label={t("route.errands.close")} onPress={() => setErrandModalVisible(false)} />
-          </Pressable>
-        </Pressable>
-      </Modal>
+        <Text style={styles.errandMeta}>
+          {formatDistanceLabel(selectedOpportunity?.distanceMeters) ?? "?"} {t("route.onTheWay.offRoute")}
+        </Text>
+      </SheetModal>
     </Screen>
   );
 }
