@@ -118,6 +118,22 @@ export default function RoutePlannerScreen() {
     return [...taskRows, ...errandRows];
   }, [errandMatches, taskOpportunities]);
 
+  // RouteMap'e geçilen durak listesini, JSX içinde satır içi `.map()` ile her
+  // render'da yeni bir dizi oluşturmak yerine, `todayRoutePlan.stops` referansı
+  // değişmediği sürece sabit tutuyoruz. `todayRoutePlan` zaten yukarıda
+  // `useMemo` ile referans olarak kararlı — bu, RouteMap içindeki
+  // payload/html memo zincirinin de kararlı kalmasını sağlar (WebView'ın
+  // Android'de gereksiz yere yeniden yüklenmesini önler).
+  const mapStops = useMemo(
+    () =>
+      todayRoutePlan.stops.map((stop) => ({
+        name: stop.company.name,
+        latitude: stop.company.latitude,
+        longitude: stop.company.longitude
+      })),
+    [todayRoutePlan.stops]
+  );
+
   const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId) ?? null;
 
   // Field tasks pool (the candidate list shown below the route) — open and
@@ -285,11 +301,7 @@ export default function RoutePlannerScreen() {
         <Text style={styles.sectionHint}>{t("route.onTheWay.subtitle")}</Text>
         <RouteMap
           origin={locationState.coords ?? null}
-          stops={todayRoutePlan.stops.map((stop) => ({
-            name: stop.company.name,
-            latitude: stop.company.latitude,
-            longitude: stop.company.longitude
-          }))}
+          stops={mapStops}
           opportunities={opportunities}
           onSelectOpportunity={(id) => setSelectedOpportunityId(id)}
         />

@@ -52,11 +52,20 @@ function buildHtml(payload: MapPayload) {
     });
   }
 
+  // Kullanıcı verisini (firma adı, görev başlığı) Leaflet'e her zaman bir DOM
+  // düğümü olarak veriyoruz — string verilirse Leaflet içeriği innerHTML ile
+  // basar ve markup çalışır. textContent kullanan bir düğüm bunu engeller.
+  function safeTooltip(text) {
+    var span = document.createElement('span');
+    span.textContent = text;
+    return span;
+  }
+
   var bounds = [];
 
   DATA.stops.forEach(function (stop, index) {
     L.marker([stop.latitude, stop.longitude], { icon: icon('pin-stop', String(index + 1)) })
-      .addTo(map).bindTooltip(stop.name);
+      .addTo(map).bindTooltip(safeTooltip(stop.name));
     bounds.push([stop.latitude, stop.longitude]);
   });
 
@@ -70,7 +79,7 @@ function buildHtml(payload: MapPayload) {
     var label = item.kind === 'task' ? '\\u25CF' : '\\u25CB';
     L.marker([item.latitude, item.longitude], { icon: icon(className, label) })
       .addTo(map)
-      .bindTooltip(item.title)
+      .bindTooltip(safeTooltip(item.title))
       .on('click', function () {
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'opportunity', id: item.id }));
       });
@@ -116,15 +125,23 @@ export function RouteMap({
   );
 
   const html = useMemo(() => buildHtml(payload), [payload]);
+  // `source` nesnesini `html` değişmediği sürece aynı referansta tutuyoruz.
+  // Android'de react-native-webview `loadDataWithBaseURL` yolu `source` her
+  // değiştiğinde (referans eşitliği kontrolü olmadan) yeniden yükleniyor;
+  // `{ html }` doğrudan JSX'te kurulursa her render'da yeni bir nesne olur ve
+  // harita pan/zoom durumunu ve açık tooltip'leri kaybederek yeniden yüklenir.
+  const source = useMemo(() => ({ html }), [html]);
   // Veri değişince WebView'ı yeniden monte et — Leaflet katmanlarını elle
   // güncellemek yerine basit ve hatasız yol.
   // Anahtar duraklarınn koordinatlarını da içerir: durak sayısı aynı kalıp
-  // firma değiştiğinde de harita tazelenmeli.
+  // firma değiştiğinde de harita tazelenmeli. İsimler/başlıklar da anahtara
+  // dahil: koordinat aynı kalıp yalnızca firma adı (rename) değişirse de
+  // harita tazelenmeli.
   const remountKey = useMemo(
     () =>
       [
-        stops.map((stop) => `${stop.latitude},${stop.longitude}`).join("|"),
-        opportunities.map((item) => item.id).join("|")
+        stops.map((stop) => `${stop.latitude},${stop.longitude},${stop.name}`).join("|"),
+        opportunities.map((item) => `${item.id},${item.title}`).join("|")
       ].join("#"),
     [opportunities, stops]
   );
@@ -136,7 +153,7 @@ export function RouteMap({
       <WebView
         key={remountKey}
         originWhitelist={["*"]}
-        source={{ html }}
+        source={source}
         javaScriptEnabled
         style={styles.web}
         // Harita yüklenemezse (ağ yok) sessizce boş kalır; liste kartı zaten var.
