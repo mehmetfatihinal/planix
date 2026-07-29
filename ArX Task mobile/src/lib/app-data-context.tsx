@@ -331,7 +331,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       taskCount: group.tasks.length
     }));
 
-    await persistAutoRouteInputs(todayTasks, data.companies).catch(() => undefined);
+    // NOT: persistAutoRouteInputs TÜM açık görevleri kabul edip kendi içinde filtreler
+    // (bkz. tanımı) — `todayTasks` (sadece bugüne tarihli) geçilirse handleHomeExit'in
+    // yeniden türettiği bugünün görevleri tüm görev kümesiyle çakışır ve excludeCompanyIds
+    // her firmayı dışlayarak fırsat listesini her zaman boşaltır. Tam listeyi geçiyoruz.
+    await persistAutoRouteInputs(data.tasks, data.companies).catch(() => undefined);
 
     // Rota kaynaklı fırsat listesi bugüne aitse dokunma — o sabah kurulan liste
     // gün içindeki veri senkronuyla ezilmemeli. Aksi hâlde rota yokken konuma

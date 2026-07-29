@@ -320,7 +320,10 @@ async function handleHomeExit() {
     const token = await getToken().catch(() => null);
     if (plan.stops.length && token) {
       const payload = buildRoutePayloadFromPlan(plan, origin, today, "auto-home-exit");
-      await createRoute(token, { ...payload, status: "planned" }).catch(() => undefined);
+      // Errand fetch aşağıda 8sn ile sınırlı — aynı nedenle burada da sınırsız ağ
+      // beklemesi headless görevi asıp fırsat hesabına, bölge yeniden kurulumuna ve
+      // özet bildirimine hiç ulaşmadan öldürülmesine yol açabilir.
+      await withTimeout(createRoute(token, { ...payload, status: "planned" }), 8000).catch(() => undefined);
     }
 
     // Koridor: rota varsa [konum, ...duraklar], yoksa [konum].
@@ -349,7 +352,13 @@ async function handleHomeExit() {
         })
       : [];
 
-    await persistTaskOpportunities({ date: today, source: "route", items: opportunities });
+    // Koridor boşsa (GPS başarısız + kullanılabilir koordinatlı durak yok) hiçbir şey
+    // değerlendirilmedi demektir — bu, "değerlendirildi, bulunamadı" anlamına gelen boş
+    // bir kayıtla karıştırılmamalı; aksi hâlde gün boyu yakın-N fallback'i haksız yere
+    // bastırılır. Yalnızca gerçekten bir değerlendirme yapıldıysa yaz.
+    if (corridor.length) {
+      await persistTaskOpportunities({ date: today, source: "route", items: opportunities });
+    }
 
     // Alışveriş fırsatları — best-effort, ağ yoksa özet yalnızca görev kısmıyla gider.
     let errandCount = 0;
@@ -400,10 +409,11 @@ async function handleHomeExit() {
 
 // Headless görevin OS tarafından öldürülmemesi için ağ çağrılarına üst sınır.
 function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), milliseconds))
-  ]);
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), milliseconds);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 // Requests foreground THEN background ("Allow all the time") location permission. Background

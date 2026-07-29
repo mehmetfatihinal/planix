@@ -178,6 +178,12 @@ export default function RoutePlannerScreen() {
       const localTodayKey = todayKeyLocal(new Date());
       await persistTaskOpportunities({ date: localTodayKey, source: "route", items: taskOpportunities });
 
+      // Görev fırsatlarını (ve varsa önceki rotanın alışveriş bölgelerini temizlemek
+      // için boş bir errand listesini) ağ adımından ÖNCE, koşulsuz olarak OS'a
+      // kaydet — bağlantı yoksa/errand isteği başarısız olsa bile görev fırsatı
+      // bölgeleri izlenmeye alınmış olsun. Errand alınması aşağıda ayrıca dener.
+      await registerErrandGeofences([]);
+
       const coords: Array<[number, number]> = [];
       if (origin) coords.push([origin.latitude, origin.longitude]);
       for (const stop of todayRoutePlan.stops) {
@@ -197,9 +203,9 @@ export default function RoutePlannerScreen() {
       }));
       await registerErrandGeofences(errands);
 
-      if (matches.length) {
-        setErrandMatches(matches);
-      }
+      // Her zaman fetch sonucuna eşitle — önceki rotadan kalan errand satırları,
+      // yeni rota dükkan bulamadığında listede/haritada takılı kalmasın.
+      setErrandMatches(matches);
     } catch {
       // Best-effort — fırsat kontrolü rota başlatmayı asla bozmamalı.
     }
