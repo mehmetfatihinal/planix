@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { AppHeader } from "@/components/app-header";
@@ -14,7 +14,7 @@ import { useI18n } from "@/lib/i18n";
 import type { ErrandGeofenceInput } from "@/lib/geofencing";
 import { canRouteToCompany, formatDistanceLabel, hasUsableCoordinates, openCompanyRoute, openMultiCompanyRoute } from "@/lib/location";
 import { useUserLocation } from "@/lib/location-context";
-import { buildRoutePayloadFromPlan, buildTodayRoutePlan, describeRouteExclusion } from "@/lib/today-route";
+import { buildRoutePayloadFromPlan, buildTodayRoutePlan, describeRouteExclusion, MAX_ROUTE_STOPS } from "@/lib/today-route";
 import type { ErrandMatch, RoutePlan, UserLocationCoordinates } from "@/types/business";
 import {
   findTaskOpportunities,
@@ -23,7 +23,8 @@ import {
 } from "@/lib/route-opportunities";
 import { persistTaskOpportunities } from "@/lib/geofencing";
 import { todayKeyLocal } from "@/lib/geofence-throttle-state";
-import type { RouteOpportunity } from "@/types/business";
+import { muteRegionForToday } from "@/lib/geofence-throttle";
+import type { Company, RouteOpportunity } from "@/types/business";
 import { RouteMap } from "@/components/route-map";
 
 export default function RoutePlannerScreen() {
@@ -41,6 +42,9 @@ export default function RoutePlannerScreen() {
   // "Yola çıkmadan önce" — shops on the way that sell an open shopping-list errand.
   const [errandMatches, setErrandMatches] = useState<ErrandMatch[]>([]);
   const [selectedOpportunityId, setSelectedOpportunityId] = useState<string | null>(null);
+  // Kullanıcının fırsat listesinden rotaya eklediği ek duraklar. Fırsatlar
+  // varsayılan olarak rotaya girmez — bu tamamen isteğe bağlı.
+  const [manualExtraStops, setManualExtraStops] = useState<Company[]>([]);
 
   // `now` bir referans olarak stabil kalmalı: her render'da yeni bir Date, altındaki
   // useMemo zincirini (todayRouteSourceTasks → todayRoutePlan → corridor →
@@ -199,6 +203,23 @@ export default function RoutePlannerScreen() {
 
   async function handleStartTodayRoute() {
     try {
+      // Kullanıcının elle eklediği fırsat durakları planın sonuna eklenir.
+      // Google Maps URL API'si 9 ara nokta + 1 varış kabul ettiği için MAX_ROUTE_STOPS ile kırpılır.
+      const effectivePlan = manualExtraStops.length
+        ? {
+            ...todayRoutePlan,
+            stops: [
+              ...todayRoutePlan.stops,
+              ...manualExtraStops.map((company) => ({
+                company,
+                tasks: [],
+                distanceMeters: null,
+                firstDueSortKey: "9999-12-31T23:59"
+              }))
+            ].slice(0, MAX_ROUTE_STOPS)
+          }
+        : todayRoutePlan;
+
       if (!todayRoutePlan.stops.length) return;
 
       let nextCoords = locationState.coords;
@@ -217,7 +238,7 @@ export default function RoutePlannerScreen() {
         try {
           let route = savedRoute;
           if (!route) {
-            const payload = buildRoutePayloadFromPlan(todayRoutePlan, nextCoords ?? null, todayKey, "manual");
+            const payload = buildRoutePayloadFromPlan(effectivePlan, nextCoords ?? null, todayKey, "manual");
             route = await createRoute(token, { ...payload, status: "planned" });
             setSavedRoute(route);
           }
@@ -233,7 +254,10 @@ export default function RoutePlannerScreen() {
       // Kick off the along-the-route errand check in parallel — must not delay navigation.
       void loadRouteOpportunities(nextCoords ?? null);
 
-      await openMultiCompanyRoute(todayRoutePlan.stops.map((stop) => stop.company), nextCoords ?? null);
+      await openMultiCompanyRoute(
+        effectivePlan.stops.map((stop) => stop.company),
+        nextCoords ?? null
+      );
 
       if (todayRoutePlan.excludedTasks.length) {
         Alert.alert(
@@ -244,6 +268,42 @@ export default function RoutePlannerScreen() {
     } catch (error) {
       Alert.alert("Rota acilamadi", error instanceof Error ? error.message : "Google Maps rotasi baslatilamadi.");
     }
+  }
+
+  // Tek noktalık yol tarifi — ana rotaya dokunmaz.
+  async function openPointRoute(opportunity: RouteOpportunity) {
+    const query = `${opportunity.latitude},${opportunity.longitude}`;
+    await Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${query}`).catch(() =>
+      Alert.alert("Harita açılamadı", "Google Maps açılamadı.")
+    );
+  }
+
+  // Fırsatı isteğe bağlı olarak rotaya ekler. Google Maps URL API'si en fazla
+  // 9 ara nokta + 1 varış kabul ettiği için toplam MAX_ROUTE_STOPS ile sınırlı.
+  function handleAddToRoute() {
+    if (!selectedOpportunity?.companyId) return;
+    const company = companyById(data.companies, selectedOpportunity.companyId);
+    if (!company) return;
+    const total = todayRoutePlan.stops.length + manualExtraStops.length;
+    if (total >= MAX_ROUTE_STOPS) {
+      Alert.alert(t("route.onTheWay.title"), t("route.onTheWay.routeFull"));
+      return;
+    }
+    setManualExtraStops((current) =>
+      current.some((item) => item.id === company.id) ? current : [...current, company]
+    );
+    setSelectedOpportunityId(null);
+  }
+
+  // Bu yeri bugün için sustur — geofence bildirim kimliğiyle aynı anahtar kullanılır.
+  async function handleMuteToday() {
+    if (!selectedOpportunity) return;
+    const regionId =
+      selectedOpportunity.kind === "task"
+        ? `opp:${selectedOpportunity.companyId}`
+        : selectedOpportunity.id;
+    await muteRegionForToday(regionId).catch(() => undefined);
+    setSelectedOpportunityId(null);
   }
 
   async function handleMarkStopVisited(companyId: string) {
@@ -469,6 +529,25 @@ export default function RoutePlannerScreen() {
         title={selectedOpportunity?.title ?? ""}
         subtitle={selectedOpportunity?.subtitle}
         onClose={() => setSelectedOpportunityId(null)}
+        footer={
+          <View style={styles.sheetActions}>
+            <PrimaryButton
+              label={t("route.onTheWay.directions")}
+              onPress={() => {
+                if (selectedOpportunity) void openPointRoute(selectedOpportunity);
+                setSelectedOpportunityId(null);
+              }}
+            />
+            {selectedOpportunity?.kind === "task" ? (
+              <Pressable style={styles.sheetSecondary} onPress={() => handleAddToRoute()}>
+                <Text style={styles.sheetSecondaryText}>{t("route.onTheWay.addToRoute")}</Text>
+              </Pressable>
+            ) : null}
+            <Pressable style={styles.sheetSecondary} onPress={() => void handleMuteToday()}>
+              <Text style={styles.sheetSecondaryText}>{t("route.onTheWay.muteToday")}</Text>
+            </Pressable>
+          </View>
+        }
       >
         <Text style={styles.errandMeta}>
           {formatDistanceLabel(selectedOpportunity?.distanceMeters) ?? "?"} {t("route.onTheWay.offRoute")}
@@ -657,5 +736,20 @@ const styles = StyleSheet.create({
   errandMeta: {
     color: colors.muted,
     fontSize: 13
+  },
+  sheetActions: {
+    gap: 8
+  },
+  sheetSecondary: {
+    alignItems: "center",
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border
+  },
+  sheetSecondaryText: {
+    color: colors.textSoft,
+    fontSize: 14,
+    fontWeight: "600"
   }
 });
