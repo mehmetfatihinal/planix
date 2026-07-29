@@ -154,6 +154,10 @@ export default function RoutePlannerScreen() {
   const excludedNames = Array.from(new Set(todayRoutePlan.excludedTasks.map((item) => item.task.title)))
     .slice(0, 3)
     .join(", ");
+  // "Durak" istatistiği, rota başladığında gerçekten kullanılacak durak sayısını
+  // göstermeli — gerçek duraklar hep öncelikli, elle eklenenler yalnızca kalan
+  // kapasiteyi doldurur (bkz. handleStartTodayRoute'taki effectivePlan kırpması).
+  const routeStopCount = Math.min(todayRoutePlan.stops.length + manualExtraStops.length, MAX_ROUTE_STOPS);
   const firstStop = todayRoutePlan.stops[0] ?? null;
   const firstStopTime = firstStop?.tasks
     .slice()
@@ -203,8 +207,16 @@ export default function RoutePlannerScreen() {
 
   async function handleStartTodayRoute() {
     try {
+      if (!todayRoutePlan.stops.length) return;
+
       // Kullanıcının elle eklediği fırsat durakları planın sonuna eklenir.
       // Google Maps URL API'si 9 ara nokta + 1 varış kabul ettiği için MAX_ROUTE_STOPS ile kırpılır.
+      // Gerçek rota durakları her zaman öncelikli tutulur (zaten MAX_ROUTE_STOPS'u asla
+      // aşmaz) — sınır aşılırsa fazlalık yalnızca elle eklenen duraklardan düşer ve
+      // kullanıcı bunu sessizce değil, uyarıyla öğrenir.
+      if (manualExtraStops.length && todayRoutePlan.stops.length + manualExtraStops.length > MAX_ROUTE_STOPS) {
+        Alert.alert(t("route.onTheWay.title"), t("route.onTheWay.routeFull"));
+      }
       const effectivePlan = manualExtraStops.length
         ? {
             ...todayRoutePlan,
@@ -219,8 +231,6 @@ export default function RoutePlannerScreen() {
             ].slice(0, MAX_ROUTE_STOPS)
           }
         : todayRoutePlan;
-
-      if (!todayRoutePlan.stops.length) return;
 
       let nextCoords = locationState.coords;
       if (!nextCoords && locationState.canAskAgain && locationState.status !== "denied") {
@@ -278,20 +288,28 @@ export default function RoutePlannerScreen() {
     );
   }
 
-  // Fırsatı isteğe bağlı olarak rotaya ekler. Google Maps URL API'si en fazla
-  // 9 ara nokta + 1 varış kabul ettiği için toplam MAX_ROUTE_STOPS ile sınırlı.
+  // Fırsatı isteğe bağlı olarak rotaya ekler/çıkarır (toggle). Zaten eklenmiş bir
+  // fırsata tekrar dokunmak — rota dolu olsa bile — onu listeden çıkarır; bu yüzden
+  // üyelik kontrolü kapasite kontrolünden ÖNCE yapılır. Google Maps URL API'si en
+  // fazla 9 ara nokta + 1 varış kabul ettiği için toplam MAX_ROUTE_STOPS ile sınırlı.
   function handleAddToRoute() {
     if (!selectedOpportunity?.companyId) return;
     const company = companyById(data.companies, selectedOpportunity.companyId);
     if (!company) return;
+
+    const alreadyStaged = manualExtraStops.some((item) => item.id === company.id);
+    if (alreadyStaged) {
+      setManualExtraStops((current) => current.filter((item) => item.id !== company.id));
+      setSelectedOpportunityId(null);
+      return;
+    }
+
     const total = todayRoutePlan.stops.length + manualExtraStops.length;
     if (total >= MAX_ROUTE_STOPS) {
       Alert.alert(t("route.onTheWay.title"), t("route.onTheWay.routeFull"));
       return;
     }
-    setManualExtraStops((current) =>
-      current.some((item) => item.id === company.id) ? current : [...current, company]
-    );
+    setManualExtraStops((current) => [...current, company]);
     setSelectedOpportunityId(null);
   }
 
@@ -326,7 +344,7 @@ export default function RoutePlannerScreen() {
       <AppHeader title="Rota plani" subtitle="Bugun gunluk gorevlerden olusan canli rotani plania, eksik adresleri an be an gor." />
 
       <View style={styles.statsGrid}>
-        <StatTile label="Durak" value={todayRoutePlan.stops.length} accent={colors.primary} />
+        <StatTile label="Durak" value={routeStopCount} accent={colors.primary} />
         <StatTile label="Saha gorevi" value={fieldTasks.length} accent={colors.text} />
         <StatTile label="Ilk durak saati" value={firstStopTime ?? "-"} accent={colors.warning} />
         <StatTile
@@ -368,27 +386,33 @@ export default function RoutePlannerScreen() {
         {opportunities.length === 0 ? (
           <EmptyState title={t("route.onTheWay.empty")} description={t("route.onTheWay.subtitle")} />
         ) : (
-          opportunities.map((item) => (
-            <Pressable key={item.id} onPress={() => setSelectedOpportunityId(item.id)} style={styles.errandRow}>
-              <View style={styles.errandIcon}>
-                <Feather
-                  name={item.kind === "task" ? "briefcase" : "shopping-bag"}
-                  size={16}
-                  color={colors.primaryDark}
-                />
-              </View>
-              <View style={styles.errandCopy}>
-                <Text style={styles.errandTitle}>
-                  {item.title} — {item.subtitle}
-                </Text>
-                <Text style={styles.errandMeta}>
-                  {t(item.kind === "task" ? "route.onTheWay.tasks" : "route.onTheWay.errands")} ·{" "}
-                  {formatDistanceLabel(item.distanceMeters) ?? "?"} {t("route.onTheWay.offRoute")}
-                </Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={colors.subtle} />
-            </Pressable>
-          ))
+          opportunities.map((item) => {
+            const isStaged = Boolean(
+              item.companyId && manualExtraStops.some((company) => company.id === item.companyId)
+            );
+            return (
+              <Pressable key={item.id} onPress={() => setSelectedOpportunityId(item.id)} style={styles.errandRow}>
+                <View style={styles.errandIcon}>
+                  <Feather
+                    name={item.kind === "task" ? "briefcase" : "shopping-bag"}
+                    size={16}
+                    color={colors.primaryDark}
+                  />
+                </View>
+                <View style={styles.errandCopy}>
+                  <Text style={styles.errandTitle}>
+                    {item.title} — {item.subtitle}
+                  </Text>
+                  <Text style={styles.errandMeta}>
+                    {t(item.kind === "task" ? "route.onTheWay.tasks" : "route.onTheWay.errands")} ·{" "}
+                    {formatDistanceLabel(item.distanceMeters) ?? "?"} {t("route.onTheWay.offRoute")}
+                  </Text>
+                </View>
+                {isStaged ? <Chip label={t("route.onTheWay.addToRoute")} tone="success" /> : null}
+                <Feather name="chevron-right" size={18} color={colors.subtle} />
+              </Pressable>
+            );
+          })
         )}
       </Card>
 
