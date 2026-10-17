@@ -981,7 +981,11 @@ app.MapPost("/tasks/{id}/habit-stop", [Authorize] async (string id, ClaimsPrinci
 // --- Alışveriş listesi (R11) --------------------------------------------------
 
 app.MapGet("/shopping-items", [Authorize] async (ClaimsPrincipal principal, ArxTaskDbContext db) =>
-    await db.ShoppingItems.WhereUser(principal).OrderBy(item => item.Status).ThenByDescending(item => item.CreatedAt).ToListAsync());
+    // SQLite cannot ORDER BY on DateTimeOffset — materialise first, sort in-memory.
+    (await db.ShoppingItems.WhereUser(principal).ToListAsync())
+        .OrderBy(item => item.Status)
+        .ThenByDescending(item => item.CreatedAt)
+        .ToList());
 app.MapPost("/shopping-items", [Authorize] async (ClaimsPrincipal principal, ShoppingItemEntity input, ArxTaskDbContext db) =>
     await CreateOwned(db, principal, input, db.ShoppingItems));
 app.MapPut("/shopping-items/{id}", [Authorize] async (string id, ClaimsPrincipal principal, ShoppingItemEntity input, ArxTaskDbContext db) =>
@@ -1225,10 +1229,10 @@ app.MapPost("/offers/from-url", [Authorize] async (
     var scraped = ExtractProductsFromHtml(html, uri);
     if (scraped.Count == 0)
     {
-        var apiKey = configuration["OpenAI:ApiKey"];
-        if (!string.IsNullOrWhiteSpace(apiKey))
+        var aiProvider = ResolveAiProvider(configuration, "ProductScrape");
+        if (aiProvider.IsConfigured)
         {
-            scraped = await ExtractProductsWithOpenAi(html, uri, configuration, httpClientFactory, apiKey!);
+            scraped = await ExtractProductsWithOpenAi(html, uri, configuration, httpClientFactory, aiProvider.ApiKey ?? "");
         }
     }
     if (scraped.Count == 0)
@@ -1320,15 +1324,15 @@ app.MapPost("/documents/scan", [Authorize] async (
     string summary = "";
     string fieldsJson = "";
     var resolvedType = string.IsNullOrWhiteSpace(documentType) ? "scan" : documentType!.Trim();
-    var apiKey = configuration["OpenAI:ApiKey"];
+    var aiProvider = ResolveAiProvider(configuration, "DocumentOcr", vision: true);
     var isImage = stored.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
-    if (isImage && !string.IsNullOrWhiteSpace(apiKey))
+    if (isImage && aiProvider.IsConfigured)
     {
         var seller = await db.Users.FindAsync(userId);
         var company = string.IsNullOrWhiteSpace(companyId)
             ? null
             : await db.Companies.FirstOrDefaultAsync(item => item.UserId == userId && item.Id == companyId);
-        var ocr = await AnalyzeDocumentWithVision(stored, seller, company, language ?? "tr", configuration, httpClientFactory, apiKey!);
+        var ocr = await AnalyzeDocumentWithVision(stored, seller, company, language ?? "tr", configuration, httpClientFactory, aiProvider.ApiKey ?? "");
         if (ocr is not null)
         {
             extractedText = ocr.Value.ExtractedText;
@@ -1355,7 +1359,7 @@ app.MapPost("/documents/scan", [Authorize] async (
     db.Documents.Add(document);
     stored.RelatedId = document.Id;
     await db.SaveChangesAsync();
-    return Results.Ok(new { document, fields = TryParseJson(fieldsJson), ocrAvailable = isImage && !string.IsNullOrWhiteSpace(apiKey) });
+    return Results.Ok(new { document, fields = TryParseJson(fieldsJson), ocrAvailable = isImage && aiProvider.IsConfigured });
 }).DisableAntiforgery();
 
 // Çıkarılan alanlardan doldurulmuş temiz bir PDF üretir.
@@ -1388,10 +1392,10 @@ app.MapPost("/late-notice/draft", [Authorize] async (
     var message = BuildLateNoticeMessage(user, company, task, delayMinutes, NormalizeLanguage(request.Language ?? "tr"));
 
     // OpenAI varsa taslağı doğal bir üsluba çevir; yoksa şablon yeterli.
-    var apiKey = configuration["OpenAI:ApiKey"];
-    if (!string.IsNullOrWhiteSpace(apiKey))
+    var aiProvider = ResolveAiProvider(configuration, "MessagePolish");
+    if (aiProvider.IsConfigured)
     {
-        var polished = await PolishMessageWithOpenAi(message, NormalizeLanguage(request.Language ?? "tr"), configuration, httpClientFactory, apiKey!);
+        var polished = await PolishMessageWithOpenAi(message, NormalizeLanguage(request.Language ?? "tr"), configuration, httpClientFactory, aiProvider.ApiKey ?? "");
         if (!string.IsNullOrWhiteSpace(polished)) message = polished!;
     }
 
@@ -2584,8 +2588,8 @@ static async Task<IResult> AnalyzeAndCommitCapture(
     }
     var sourceText = request.SourceText.Trim();
 
-    var apiKey = configuration["OpenAI:ApiKey"];
-    if (string.IsNullOrWhiteSpace(apiKey))
+    var aiProvider = ResolveAiProvider(configuration, "Capture");
+    if (!aiProvider.IsConfigured)
     {
         return Results.Problem("OpenAI API key is not configured. Set OpenAI__ApiKey before starting the API.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
@@ -2596,7 +2600,7 @@ static async Task<IResult> AnalyzeAndCommitCapture(
     var productCatalog = await db.Products.Where(item => item.UserId == userId).OrderBy(item => item.Name).Take(120).ToListAsync();
     try
     {
-        var analysis = await AnalyzeWithOpenAi(sourceText, request.Language, existingCompanies, existingModules, productCatalog, configuration, httpClientFactory, apiKey);
+        var analysis = await AnalyzeWithOpenAi(sourceText, request.Language, existingCompanies, existingModules, productCatalog, configuration, httpClientFactory, aiProvider.ApiKey ?? "");
         var companyResolution = await BuildCompanyResolutionPrompt(db, userId, analysis, request.SourceText);
         if (companyResolution is not null && request.CompanyResolution is null)
         {
@@ -2640,6 +2644,30 @@ static async Task<IResult> AnalyzeAndCommitCapture(
     }
 }
 
+// Yapay zeka saglayicisini ozellik bazinda cozer. Kok "OpenAI:*" ayarlari varsayilandir;
+// "OpenAI:Features:<ozellik>:*" altinda ayni anahtarlar tanimliysa o cagri icin onlar gecerlidir.
+// Boylece bir kisim cagri kendi sunucumuzdaki OpenAI uyumlu uca (Ollama/vLLM) gidip
+// digerleri OpenAI'da kalabilir. Anahtar yalnizca OpenAI ucu icin zorunludur.
+static (string Endpoint, string Model, string? ApiKey, bool IsConfigured) ResolveAiProvider(
+    IConfiguration configuration,
+    string feature,
+    bool vision = false)
+{
+    string? Pick(string key)
+    {
+        var scoped = configuration[$"OpenAI:Features:{feature}:{key}"];
+        if (!string.IsNullOrWhiteSpace(scoped)) return scoped.Trim();
+        var root = configuration[$"OpenAI:{key}"];
+        return string.IsNullOrWhiteSpace(root) ? null : root.Trim();
+    }
+
+    var baseUrl = (Pick("BaseUrl") ?? "https://api.openai.com/v1").TrimEnd('/');
+    var apiKey = Pick("ApiKey");
+    var model = (vision ? Pick("VisionModel") : null) ?? Pick("ChatModel") ?? "gpt-4o-mini";
+    var isOpenAi = baseUrl.Contains("api.openai.com", StringComparison.OrdinalIgnoreCase);
+    return ($"{baseUrl}/chat/completions", model, apiKey, !string.IsNullOrWhiteSpace(apiKey) || !isOpenAi);
+}
+
 static async Task<AiCaptureAnalysis> AnalyzeWithOpenAi(
     string sourceText,
     string language,
@@ -2651,7 +2679,8 @@ static async Task<AiCaptureAnalysis> AnalyzeWithOpenAi(
     string apiKey)
 {
     var today = DateOnly.FromDateTime(DateTime.Now).ToString("yyyy-MM-dd");
-    var model = configuration["OpenAI:ChatModel"] ?? "gpt-4o-mini";
+    var aiProvider = ResolveAiProvider(configuration, "Capture");
+    var model = aiProvider.Model;
     var systemPrompt = """
 You are the business memory parser for Planix — a Turkish field-operations CRM. Your only job is to convert one short user note (voice or text) into a strict JSON object that downstream code can commit without any guessing.
 
@@ -2794,8 +2823,8 @@ Return the JSON now.
         }
     });
 
-    using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+    using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
+    if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
     request.Content = new StringContent(JsonSerializer.Serialize(new
     {
         model,
@@ -2840,8 +2869,8 @@ static async Task<IResult> AnswerAssistant(
         return Results.BadRequest(new { message = "Question is required." });
     }
 
-    var apiKey = configuration["OpenAI:ApiKey"];
-    if (string.IsNullOrWhiteSpace(apiKey))
+    var aiProvider = ResolveAiProvider(configuration, "Assistant");
+    if (!aiProvider.IsConfigured)
     {
         // No key — let the client fall back to its offline keyword summary.
         return Results.Problem("Assistant is not configured.", statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -2906,11 +2935,11 @@ static async Task<IResult> AnswerAssistant(
 
     var userPrompt = $"SORU:\n{question}\n\nGÜNCEL VERİ (JSON):\n{JsonSerializer.Serialize(snapshot)}";
 
-    var model = configuration["OpenAI:ChatModel"] ?? "gpt-4o-mini";
+    var model = aiProvider.Model;
     try
     {
-        using var openAiRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-        openAiRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        using var openAiRequest = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
+        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) openAiRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
         openAiRequest.Content = new StringContent(JsonSerializer.Serialize(new
         {
             model,
@@ -5782,14 +5811,14 @@ static string? InferTaskTypeFromText(string text)
 // Kurallar sonuç vermezse mevcut OpenAI entegrasyonuyla tip sınıflandırması (anahtar yoksa sessizce atlanır).
 static async Task<string?> ClassifyTaskWithOpenAi(ArxTaskDbContext db, string userId, BusinessTaskEntity task, IConfiguration configuration, IHttpClientFactory httpClientFactory)
 {
-    var apiKey = configuration["OpenAI:ApiKey"];
-    if (string.IsNullOrWhiteSpace(apiKey)) return null;
+    var aiProvider = ResolveAiProvider(configuration, "TaskType");
+    if (!aiProvider.IsConfigured) return null;
     try
     {
         var modules = await db.Modules.Where(item => item.UserId == userId).Select(item => new { item.Name, item.Type }).Take(40).ToListAsync();
-        var model = configuration["OpenAI:ChatModel"] ?? "gpt-4o-mini";
-        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        var model = aiProvider.Model;
+        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
+        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
         request.Content = new StringContent(JsonSerializer.Serialize(new
         {
             model,
@@ -6735,9 +6764,10 @@ static async Task<List<ScrapedProduct>> ExtractProductsWithOpenAi(string html, U
         if (text.Length > 12000) text = text[..12000];
         if (text.Length < 40) return [];
 
-        var model = configuration["OpenAI:ChatModel"] ?? "gpt-4o-mini";
-        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        var aiProvider = ResolveAiProvider(configuration, "ProductScrape");
+        var model = aiProvider.Model;
+        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
+        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
         request.Content = new StringContent(JsonSerializer.Serialize(new
         {
             model,
@@ -6792,7 +6822,8 @@ static async Task<(string ExtractedText, string Summary, string FieldsJson, stri
     {
         var bytes = await File.ReadAllBytesAsync(stored.StoragePath);
         var dataUrl = $"data:{stored.ContentType};base64,{Convert.ToBase64String(bytes)}";
-        var model = configuration["OpenAI:VisionModel"] ?? configuration["OpenAI:ChatModel"] ?? "gpt-4o-mini";
+        var aiProvider = ResolveAiProvider(configuration, "DocumentOcr", vision: true);
+        var model = aiProvider.Model;
         var context = JsonSerializer.Serialize(new
         {
             today = AppTime.UserToday(DateTimeOffset.Now).ToString("yyyy-MM-dd"),
@@ -6824,8 +6855,8 @@ static async Task<(string ExtractedText, string Summary, string FieldsJson, stri
             "\"suggestedValue\": string (for BLANK fields only: fill from the provided user/customer context when it is clearly the right value — company name, address, phone, email, tax id, IBAN, date — else empty)}]}. " +
             "List every labeled slot or blank line of the form as a field.";
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
+        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
         request.Content = new StringContent(JsonSerializer.Serialize(new
         {
             model,
@@ -6889,9 +6920,10 @@ static async Task<string?> PolishMessageWithOpenAi(string message, string langua
 {
     try
     {
-        var model = configuration["OpenAI:ChatModel"] ?? "gpt-4o-mini";
-        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        var aiProvider = ResolveAiProvider(configuration, "MessagePolish");
+        var model = aiProvider.Model;
+        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
+        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
         request.Content = new StringContent(JsonSerializer.Serialize(new
         {
             model,

@@ -3,7 +3,7 @@
     "name": "Planix",
     "slug": "arx-task-mobile",
     "scheme": "arxtaskmobile",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -30,6 +30,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
+      "versionCode": 2,
       "package": "com.arxtask.mobile",
       "googleServicesFile": "./google-services.json",
       "permissions": [
