@@ -21,6 +21,7 @@ using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
 using WebPush;
+using Claude = Anthropic.Models.Messages;
 
 QuestPDF.Settings.License = LicenseType.Community;
 
@@ -387,8 +388,8 @@ app.MapPost("/ai-capture/analyze-and-commit", [Authorize] async (
     IHttpClientFactory httpClientFactory) =>
     await AnalyzeAndCommitCapture(principal, request, db, configuration, httpClientFactory));
 
-// Conversational assistant over the user's own business data (real OpenAI call, grounded
-// on a server-built snapshot). Returns 503 when no OpenAI key is configured so the client
+// Conversational assistant over the user's own business data (real Claude call, grounded
+// on a server-built snapshot). Returns 503 when no Anthropic key is configured so the client
 // can fall back to its offline keyword summary.
 app.MapPost("/assistant/ask", [Authorize] async (
     ClaimsPrincipal principal,
@@ -1232,7 +1233,7 @@ app.MapPost("/offers/from-url", [Authorize] async (
         var aiProvider = ResolveAiProvider(configuration, "ProductScrape");
         if (aiProvider.IsConfigured)
         {
-            scraped = await ExtractProductsWithOpenAi(html, uri, configuration, httpClientFactory, aiProvider.ApiKey ?? "");
+            scraped = await ExtractProductsWithClaude(html, uri, configuration);
         }
     }
     if (scraped.Count == 0)
@@ -1324,7 +1325,7 @@ app.MapPost("/documents/scan", [Authorize] async (
     string summary = "";
     string fieldsJson = "";
     var resolvedType = string.IsNullOrWhiteSpace(documentType) ? "scan" : documentType!.Trim();
-    var aiProvider = ResolveAiProvider(configuration, "DocumentOcr", vision: true);
+    var aiProvider = ResolveAiProvider(configuration, "DocumentOcr");
     var isImage = stored.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
     if (isImage && aiProvider.IsConfigured)
     {
@@ -1332,7 +1333,7 @@ app.MapPost("/documents/scan", [Authorize] async (
         var company = string.IsNullOrWhiteSpace(companyId)
             ? null
             : await db.Companies.FirstOrDefaultAsync(item => item.UserId == userId && item.Id == companyId);
-        var ocr = await AnalyzeDocumentWithVision(stored, seller, company, language ?? "tr", configuration, httpClientFactory, aiProvider.ApiKey ?? "");
+        var ocr = await AnalyzeDocumentWithVision(stored, seller, company, language ?? "tr", configuration);
         if (ocr is not null)
         {
             extractedText = ocr.Value.ExtractedText;
@@ -1391,11 +1392,11 @@ app.MapPost("/late-notice/draft", [Authorize] async (
     var delayMinutes = Math.Clamp(request.DelayMinutes, 1, 24 * 60);
     var message = BuildLateNoticeMessage(user, company, task, delayMinutes, NormalizeLanguage(request.Language ?? "tr"));
 
-    // OpenAI varsa taslağı doğal bir üsluba çevir; yoksa şablon yeterli.
+    // Claude varsa taslağı doğal bir üsluba çevir; yoksa şablon yeterli.
     var aiProvider = ResolveAiProvider(configuration, "MessagePolish");
     if (aiProvider.IsConfigured)
     {
-        var polished = await PolishMessageWithOpenAi(message, NormalizeLanguage(request.Language ?? "tr"), configuration, httpClientFactory, aiProvider.ApiKey ?? "");
+        var polished = await PolishMessageWithClaude(message, NormalizeLanguage(request.Language ?? "tr"), configuration);
         if (!string.IsNullOrWhiteSpace(polished)) message = polished!;
     }
 
@@ -2591,7 +2592,7 @@ static async Task<IResult> AnalyzeAndCommitCapture(
     var aiProvider = ResolveAiProvider(configuration, "Capture");
     if (!aiProvider.IsConfigured)
     {
-        return Results.Problem("OpenAI API key is not configured. Set OpenAI__ApiKey before starting the API.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        return Results.Problem("Anthropic API key is not configured. Set Anthropic__ApiKey before starting the API.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
     var userId = principal.UserId();
@@ -2600,7 +2601,7 @@ static async Task<IResult> AnalyzeAndCommitCapture(
     var productCatalog = await db.Products.Where(item => item.UserId == userId).OrderBy(item => item.Name).Take(120).ToListAsync();
     try
     {
-        var analysis = await AnalyzeWithOpenAi(sourceText, request.Language, existingCompanies, existingModules, productCatalog, configuration, httpClientFactory, aiProvider.ApiKey ?? "");
+        var analysis = await AnalyzeWithClaude(sourceText, request.Language, existingCompanies, existingModules, productCatalog, configuration);
         var companyResolution = await BuildCompanyResolutionPrompt(db, userId, analysis, request.SourceText);
         if (companyResolution is not null && request.CompanyResolution is null)
         {
@@ -2644,43 +2645,99 @@ static async Task<IResult> AnalyzeAndCommitCapture(
     }
 }
 
-// Yapay zeka saglayicisini ozellik bazinda cozer. Kok "OpenAI:*" ayarlari varsayilandir;
-// "OpenAI:Features:<ozellik>:*" altinda ayni anahtarlar tanimliysa o cagri icin onlar gecerlidir.
-// Boylece bir kisim cagri kendi sunucumuzdaki OpenAI uyumlu uca (Ollama/vLLM) gidip
-// digerleri OpenAI'da kalabilir. Anahtar yalnizca OpenAI ucu icin zorunludur.
-static (string Endpoint, string Model, string? ApiKey, bool IsConfigured) ResolveAiProvider(
-    IConfiguration configuration,
-    string feature,
-    bool vision = false)
+// Yapay zeka cagrilari Anthropic Claude API'sine gider. Anahtar "Anthropic:ApiKey"
+// (ortam degiskeni: Anthropic__ApiKey); yoksa AI ozellikleri kapali kalir.
+// Model varsayilan olarak "Anthropic:Model" (o da yoksa claude-haiku-5-5);
+// "Anthropic:Features:<ozellik>:Model" tanimliysa o cagri icin o model kullanilir.
+static (string Model, string? ApiKey, bool IsConfigured) ResolveAiProvider(IConfiguration configuration, string feature)
 {
-    string? Pick(string key)
+    string? Read(string key)
     {
-        var scoped = configuration[$"OpenAI:Features:{feature}:{key}"];
-        if (!string.IsNullOrWhiteSpace(scoped)) return scoped.Trim();
-        var root = configuration[$"OpenAI:{key}"];
-        return string.IsNullOrWhiteSpace(root) ? null : root.Trim();
+        var value = configuration[key];
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
-    var baseUrl = (Pick("BaseUrl") ?? "https://api.openai.com/v1").TrimEnd('/');
-    var apiKey = Pick("ApiKey");
-    var model = (vision ? Pick("VisionModel") : null) ?? Pick("ChatModel") ?? "gpt-4o-mini";
-    var isOpenAi = baseUrl.Contains("api.openai.com", StringComparison.OrdinalIgnoreCase);
-    return ($"{baseUrl}/chat/completions", model, apiKey, !string.IsNullOrWhiteSpace(apiKey) || !isOpenAi);
+    var apiKey = Read("Anthropic:ApiKey");
+    var model = Read($"Anthropic:Features:{feature}:Model") ?? Read("Anthropic:Model") ?? "claude-haiku-5-5";
+    return (model, apiKey, apiKey is not null);
 }
 
-static async Task<AiCaptureAnalysis> AnalyzeWithOpenAi(
+// Claude'a tek mesajlik istek atar ve yanit metnini dondurur. Anahtar yoksa, istek
+// basarisizsa, model reddederse ya da bos donerse InvalidOperationException firlatir.
+static async Task<string> AskClaude(
+    IConfiguration configuration,
+    string feature,
+    string systemPrompt,
+    string userText,
+    int maxTokens,
+    TimeSpan timeout,
+    (byte[] Data, string ContentType)? image = null)
+{
+    var aiProvider = ResolveAiProvider(configuration, feature);
+    if (!aiProvider.IsConfigured)
+    {
+        throw new InvalidOperationException("Anthropic API key is not configured. Set Anthropic__ApiKey before starting the API.");
+    }
+
+    Claude.MessageParamContent content = userText;
+    if (image is { } picture)
+    {
+        Claude.MediaType mediaType = picture.ContentType.ToLowerInvariant() switch
+        {
+            "image/jpeg" or "image/jpg" => Claude.MediaType.ImageJpeg,
+            "image/png" => Claude.MediaType.ImagePng,
+            "image/gif" => Claude.MediaType.ImageGif,
+            "image/webp" => Claude.MediaType.ImageWebP,
+            _ => throw new InvalidOperationException($"Unsupported image type for Claude: {picture.ContentType}")
+        };
+        content = new List<Claude.ContentBlockParam>
+        {
+            new Claude.ImageBlockParam { Source = new Claude.Base64ImageSource { Data = Convert.ToBase64String(picture.Data), MediaType = mediaType } },
+            new Claude.TextBlockParam { Text = userText }
+        };
+    }
+
+    Claude.Message response;
+    try
+    {
+        var client = ClaudeClients.For(aiProvider.ApiKey!).WithOptions(options => options with { Timeout = timeout });
+        response = await client.Messages.Create(new Claude.MessageCreateParams
+        {
+            Model = aiProvider.Model,
+            MaxTokens = maxTokens,
+            OutputConfig = new Claude.OutputConfig { Effort = Claude.Effort.Low },
+            System = systemPrompt,
+            Messages = [new() { Role = Claude.Role.User, Content = content }]
+        });
+    }
+    catch (Exception exception)
+    {
+        throw new InvalidOperationException($"Claude request failed: {exception.Message}", exception);
+    }
+
+    if (response.StopReason == "refusal")
+    {
+        throw new InvalidOperationException("Claude declined the request.");
+    }
+
+    var text = string.Concat(response.Content.Select(block => block.Value).OfType<Claude.TextBlock>().Select(block => block.Text)).Trim();
+    if (text.Length == 0)
+    {
+        throw new InvalidOperationException("Claude returned an empty response.");
+    }
+
+    return text;
+}
+
+static async Task<AiCaptureAnalysis> AnalyzeWithClaude(
     string sourceText,
     string language,
     List<string> existingCompanies,
     List<string> existingModules,
     List<ProductEntity> productCatalog,
-    IConfiguration configuration,
-    IHttpClientFactory httpClientFactory,
-    string apiKey)
+    IConfiguration configuration)
 {
     var today = DateOnly.FromDateTime(DateTime.Now).ToString("yyyy-MM-dd");
-    var aiProvider = ResolveAiProvider(configuration, "Capture");
-    var model = aiProvider.Model;
     var systemPrompt = """
 You are the business memory parser for Planix — a Turkish field-operations CRM. Your only job is to convert one short user note (voice or text) into a strict JSON object that downstream code can commit without any guessing.
 
@@ -2823,35 +2880,7 @@ Return the JSON now.
         }
     });
 
-    using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
-    if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
-    request.Content = new StringContent(JsonSerializer.Serialize(new
-    {
-        model,
-        temperature = 0.1,
-        response_format = new { type = "json_object" },
-        messages = new object[]
-        {
-            new { role = "system", content = systemPrompt },
-            new { role = "user", content = userPrompt }
-        }
-    }), Encoding.UTF8, "application/json");
-
-    var client = httpClientFactory.CreateClient();
-    using var response = await client.SendAsync(request);
-    var body = await response.Content.ReadAsStringAsync();
-    if (!response.IsSuccessStatusCode)
-    {
-        throw new InvalidOperationException($"OpenAI request failed with status {(int)response.StatusCode}: {body}");
-    }
-
-    var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(body, JsonOptions());
-    var content = completion?.Choices.FirstOrDefault()?.Message.Content;
-    if (string.IsNullOrWhiteSpace(content))
-    {
-        throw new InvalidOperationException("OpenAI returned an empty analysis.");
-    }
-
+    var content = await AskClaude(configuration, "Capture", systemPrompt, userPrompt, 16000, TimeSpan.FromSeconds(100));
     var analysis = ParseAiAnalysisContent(content);
     return NormalizeAiAnalysis(analysis, sourceText, today);
 }
@@ -2935,37 +2964,9 @@ static async Task<IResult> AnswerAssistant(
 
     var userPrompt = $"SORU:\n{question}\n\nGÜNCEL VERİ (JSON):\n{JsonSerializer.Serialize(snapshot)}";
 
-    var model = aiProvider.Model;
     try
     {
-        using var openAiRequest = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
-        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) openAiRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
-        openAiRequest.Content = new StringContent(JsonSerializer.Serialize(new
-        {
-            model,
-            temperature = 0.3,
-            messages = new object[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user", content = userPrompt }
-            }
-        }), Encoding.UTF8, "application/json");
-
-        var client = httpClientFactory.CreateClient();
-        using var response = await client.SendAsync(openAiRequest);
-        var body = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode)
-        {
-            return Results.Problem("Assistant request failed.", statusCode: StatusCodes.Status502BadGateway);
-        }
-
-        var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(body, JsonOptions());
-        var answer = completion?.Choices.FirstOrDefault()?.Message.Content?.Trim();
-        if (string.IsNullOrWhiteSpace(answer))
-        {
-            return Results.Problem("Assistant returned an empty answer.", statusCode: StatusCodes.Status502BadGateway);
-        }
-
+        var answer = await AskClaude(configuration, "Assistant", systemPrompt, userPrompt, 4000, TimeSpan.FromSeconds(100));
         return Results.Ok(new { answer });
     }
     catch
@@ -3851,12 +3852,12 @@ static AiCaptureAnalysis ParseAiAnalysisContent(string content)
     }
     catch (Exception exception)
     {
-        throw new InvalidOperationException($"OpenAI analysis JSON could not be parsed. Raw content: {content}", exception);
+        throw new InvalidOperationException($"AI analysis JSON could not be parsed. Raw content: {content}", exception);
     }
 
     if (rootNode is not JsonObject root)
     {
-        throw new InvalidOperationException($"OpenAI returned an unexpected JSON shape. Raw content: {content}");
+        throw new InvalidOperationException($"AI returned an unexpected JSON shape. Raw content: {content}");
     }
 
     var companyNode = root["company"] as JsonObject;
@@ -5744,7 +5745,7 @@ static async Task ApplyAutoCategory(ArxTaskDbContext db, string userId, Business
     }
     if (inferredType is "todo" or "custom")
     {
-        var aiType = await ClassifyTaskWithOpenAi(db, userId, task, configuration, httpClientFactory);
+        var aiType = await ClassifyTaskWithClaude(db, userId, task, configuration);
         if (!string.IsNullOrWhiteSpace(aiType))
         {
             inferredType = ExistingModuleType(aiType);
@@ -5808,35 +5809,21 @@ static string? InferTaskTypeFromText(string text)
     return null;
 }
 
-// Kurallar sonuç vermezse mevcut OpenAI entegrasyonuyla tip sınıflandırması (anahtar yoksa sessizce atlanır).
-static async Task<string?> ClassifyTaskWithOpenAi(ArxTaskDbContext db, string userId, BusinessTaskEntity task, IConfiguration configuration, IHttpClientFactory httpClientFactory)
+// Kurallar sonuç vermezse Claude ile tip sınıflandırması (anahtar yoksa sessizce atlanır).
+static async Task<string?> ClassifyTaskWithClaude(ArxTaskDbContext db, string userId, BusinessTaskEntity task, IConfiguration configuration)
 {
     var aiProvider = ResolveAiProvider(configuration, "TaskType");
     if (!aiProvider.IsConfigured) return null;
     try
     {
         var modules = await db.Modules.Where(item => item.UserId == userId).Select(item => new { item.Name, item.Type }).Take(40).ToListAsync();
-        var model = aiProvider.Model;
-        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
-        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
-        request.Content = new StringContent(JsonSerializer.Serialize(new
-        {
-            model,
-            temperature = 0,
-            response_format = new { type = "json_object" },
-            messages = new object[]
-            {
-                new { role = "system", content = "Classify the field-sales task into exactly one type from: todo, visits, calls, offers, invoices, installation, removal, repair, support, payments, projects, delivery, measurements, custom. Answer as {\"type\":\"...\"}." },
-                new { role = "user", content = JsonSerializer.Serialize(new { title = task.Title, description = task.Description, existingModules = modules }) }
-            }
-        }), Encoding.UTF8, "application/json");
-        var client = httpClientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(10);
-        using var response = await client.SendAsync(request);
-        if (!response.IsSuccessStatusCode) return null;
-        var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(await response.Content.ReadAsStringAsync(), JsonOptions());
-        var content = completion?.Choices.FirstOrDefault()?.Message.Content;
-        if (string.IsNullOrWhiteSpace(content)) return null;
+        var content = await AskClaude(
+            configuration,
+            "TaskType",
+            "Classify the field-sales task into exactly one type from: todo, visits, calls, offers, invoices, installation, removal, repair, support, payments, projects, delivery, measurements, custom. Answer ONLY as {\"type\":\"...\"}.",
+            JsonSerializer.Serialize(new { title = task.Title, description = task.Description, existingModules = modules }),
+            1024,
+            TimeSpan.FromSeconds(10));
         var node = JsonNode.Parse(ExtractFirstJsonObject(content) ?? content);
         return node?["type"]?.GetValue<string?>();
     }
@@ -6593,7 +6580,7 @@ static async Task<object> BuildWeeklyAnalysis(ArxTaskDbContext db, string userId
 }
 
 // ---------------------------------------------------------------------------
-// Linkten ürün çıkarma (R7): JSON-LD + OpenGraph, gerekirse OpenAI ile.
+// Linkten ürün çıkarma (R7): JSON-LD + OpenGraph, gerekirse Claude ile.
 // ---------------------------------------------------------------------------
 
 static bool IsPrivateHost(Uri uri)
@@ -6754,7 +6741,7 @@ static List<ScrapedProduct> ExtractProductsFromHtml(string html, Uri baseUri)
         .ToList();
 }
 
-static async Task<List<ScrapedProduct>> ExtractProductsWithOpenAi(string html, Uri uri, IConfiguration configuration, IHttpClientFactory httpClientFactory, string apiKey)
+static async Task<List<ScrapedProduct>> ExtractProductsWithClaude(string html, Uri uri, IConfiguration configuration)
 {
     try
     {
@@ -6764,29 +6751,14 @@ static async Task<List<ScrapedProduct>> ExtractProductsWithOpenAi(string html, U
         if (text.Length > 12000) text = text[..12000];
         if (text.Length < 40) return [];
 
-        var aiProvider = ResolveAiProvider(configuration, "ProductScrape");
-        var model = aiProvider.Model;
-        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
-        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
-        request.Content = new StringContent(JsonSerializer.Serialize(new
-        {
-            model,
-            temperature = 0,
-            response_format = new { type = "json_object" },
-            messages = new object[]
-            {
-                new { role = "system", content = "Extract the purchasable products from this web page text. Return {\"products\":[{\"name\":string,\"price\":number,\"currency\":string|null}]} — at most 20 products, price 0 when unknown. No commentary." },
-                new { role = "user", content = $"URL: {uri}\n\nPAGE TEXT:\n{text}" }
-            }
-        }), Encoding.UTF8, "application/json");
-        var client = httpClientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(25);
-        using var response = await client.SendAsync(request);
-        if (!response.IsSuccessStatusCode) return [];
-        var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(await response.Content.ReadAsStringAsync(), JsonOptions());
-        var content = completion?.Choices.FirstOrDefault()?.Message.Content;
-        if (string.IsNullOrWhiteSpace(content)) return [];
-        var node = JsonNode.Parse(ExtractFirstJsonObject(content!) ?? content!);
+        var content = await AskClaude(
+            configuration,
+            "ProductScrape",
+            "Extract the purchasable products from this web page text. Return ONLY {\"products\":[{\"name\":string,\"price\":number,\"currency\":string|null}]} — at most 20 products, price 0 when unknown. No commentary.",
+            $"URL: {uri}\n\nPAGE TEXT:\n{text}",
+            4000,
+            TimeSpan.FromSeconds(25));
+        var node = JsonNode.Parse(ExtractFirstJsonObject(content) ?? content);
         if (node?["products"] is not JsonArray array) return [];
         return array
             .OfType<JsonObject>()
@@ -6806,7 +6778,7 @@ static async Task<List<ScrapedProduct>> ExtractProductsWithOpenAi(string html, U
 }
 
 // ---------------------------------------------------------------------------
-// Belge tarama OCR (R18): OpenAI Vision ile metin + form alanı çıkarımı.
+// Belge tarama OCR (R18): Claude görsel okuma ile metin + form alanı çıkarımı.
 // ---------------------------------------------------------------------------
 
 static async Task<(string ExtractedText, string Summary, string FieldsJson, string DocumentType)?> AnalyzeDocumentWithVision(
@@ -6814,16 +6786,11 @@ static async Task<(string ExtractedText, string Summary, string FieldsJson, stri
     AppUser? seller,
     CompanyEntity? company,
     string language,
-    IConfiguration configuration,
-    IHttpClientFactory httpClientFactory,
-    string apiKey)
+    IConfiguration configuration)
 {
     try
     {
         var bytes = await File.ReadAllBytesAsync(stored.StoragePath);
-        var dataUrl = $"data:{stored.ContentType};base64,{Convert.ToBase64String(bytes)}";
-        var aiProvider = ResolveAiProvider(configuration, "DocumentOcr", vision: true);
-        var model = aiProvider.Model;
         var context = JsonSerializer.Serialize(new
         {
             today = AppTime.UserToday(DateTimeOffset.Now).ToString("yyyy-MM-dd"),
@@ -6855,35 +6822,15 @@ static async Task<(string ExtractedText, string Summary, string FieldsJson, stri
             "\"suggestedValue\": string (for BLANK fields only: fill from the provided user/customer context when it is clearly the right value — company name, address, phone, email, tax id, IBAN, date — else empty)}]}. " +
             "List every labeled slot or blank line of the form as a field.";
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
-        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
-        request.Content = new StringContent(JsonSerializer.Serialize(new
-        {
-            model,
-            temperature = 0,
-            response_format = new { type = "json_object" },
-            messages = new object[]
-            {
-                new { role = "system", content = systemPrompt },
-                new
-                {
-                    role = "user",
-                    content = new object[]
-                    {
-                        new { type = "text", text = $"CONTEXT (for filling blanks):\n{context}" },
-                        new { type = "image_url", image_url = new { url = dataUrl } }
-                    }
-                }
-            }
-        }), Encoding.UTF8, "application/json");
-        var client = httpClientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(60);
-        using var response = await client.SendAsync(request);
-        if (!response.IsSuccessStatusCode) return null;
-        var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(await response.Content.ReadAsStringAsync(), JsonOptions());
-        var content = completion?.Choices.FirstOrDefault()?.Message.Content;
-        if (string.IsNullOrWhiteSpace(content)) return null;
-        var node = JsonNode.Parse(ExtractFirstJsonObject(content!) ?? content!);
+        var content = await AskClaude(
+            configuration,
+            "DocumentOcr",
+            systemPrompt,
+            $"CONTEXT (for filling blanks):\n{context}",
+            16000,
+            TimeSpan.FromSeconds(60),
+            (bytes, stored.ContentType));
+        var node = JsonNode.Parse(ExtractFirstJsonObject(content) ?? content);
         if (node is not JsonObject root) return null;
         return (
             root["extractedText"]?.GetValue<string?>() ?? "",
@@ -6916,30 +6863,17 @@ static string BuildLateNoticeMessage(AppUser? user, CompanyEntity? company, Busi
     };
 }
 
-static async Task<string?> PolishMessageWithOpenAi(string message, string language, IConfiguration configuration, IHttpClientFactory httpClientFactory, string apiKey)
+static async Task<string?> PolishMessageWithClaude(string message, string language, IConfiguration configuration)
 {
     try
     {
-        var aiProvider = ResolveAiProvider(configuration, "MessagePolish");
-        var model = aiProvider.Model;
-        using var request = new HttpRequestMessage(HttpMethod.Post, aiProvider.Endpoint);
-        if (!string.IsNullOrWhiteSpace(aiProvider.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", aiProvider.ApiKey);
-        request.Content = new StringContent(JsonSerializer.Serialize(new
-        {
-            model,
-            temperature = 0.4,
-            messages = new object[]
-            {
-                new { role = "system", content = $"Rewrite the following SMS to a customer so it sounds natural and polite in language '{language}'. Keep the meaning, the delay amount and roughly the same length. Return ONLY the message text." },
-                new { role = "user", content = message }
-            }
-        }), Encoding.UTF8, "application/json");
-        var client = httpClientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(15);
-        using var response = await client.SendAsync(request);
-        if (!response.IsSuccessStatusCode) return null;
-        var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(await response.Content.ReadAsStringAsync(), JsonOptions());
-        return completion?.Choices.FirstOrDefault()?.Message.Content?.Trim();
+        return await AskClaude(
+            configuration,
+            "MessagePolish",
+            $"Rewrite the following SMS to a customer so it sounds natural and polite in language '{language}'. Keep the meaning, the delay amount and roughly the same length. Return ONLY the message text.",
+            message,
+            1024,
+            TimeSpan.FromSeconds(15));
     }
     catch
     {
@@ -7616,9 +7550,14 @@ public sealed record AiTask(
 public sealed record AiOfferData(bool Detected, List<string> Products, List<decimal> Prices, string Currency);
 public sealed record AiDocumentData(bool Detected, string? Type);
 
-public sealed record ChatCompletionResponse(List<ChatChoice> Choices);
-public sealed record ChatChoice(ChatMessage Message);
-public sealed record ChatMessage(string Content);
+// API anahtarı başına tek AnthropicClient (bağlantı havuzunu yeniden kullanır).
+public static class ClaudeClients
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Anthropic.AnthropicClient> Clients = new();
+
+    public static Anthropic.AnthropicClient For(string apiKey) =>
+        Clients.GetOrAdd(apiKey, key => new Anthropic.AnthropicClient { ApiKey = key });
+}
 
 public sealed record PushPayload(
     string Title,
