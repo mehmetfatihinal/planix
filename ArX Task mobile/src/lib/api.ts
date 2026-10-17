@@ -372,7 +372,7 @@ export async function analyzeAndCommitCapture(
   };
 }
 
-// Conversational assistant grounded on the user's own data (real OpenAI call server-side).
+// Conversational assistant grounded on the user's own data (real Claude call server-side).
 // Throws when the backend is unreachable or the assistant is not configured (HTTP 503),
 // letting the caller fall back to the offline keyword summary.
 export async function askAssistant(token: string, question: string, language: string): Promise<{ answer: string }> {
