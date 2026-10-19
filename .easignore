@@ -1,13 +1,16 @@
 # If EAS packages from the repository root, exclude everything unrelated to the mobile app.
+# Web/API folders are anchored with a leading "/" so they only match at the repo root:
+# an unanchored "app/" or "lib/" would also strip the mobile app's own "app/" routes and
+# "src/lib/", producing an APK that crashes on launch with "No routes found".
 .git/
-.next/
-api/
-app/
-components/
-lib/
-locales/
-public/
-types/
+/.next/
+/api/
+/app/
+/components/
+/lib/
+/locales/
+/public/
+/types/
 .claude/
 node_modules/
 *.log
