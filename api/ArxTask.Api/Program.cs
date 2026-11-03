@@ -1666,6 +1666,12 @@ static void EnsureSqliteSchema(ArxTaskDbContext db)
             );
             """;
         createWhatsAppMessages.ExecuteNonQuery();
+
+        using var indexWhatsAppMessages = connection.CreateCommand();
+        indexWhatsAppMessages.CommandText = """
+            CREATE INDEX IF NOT EXISTS "IX_WhatsAppMessages_UserId_Date_Kind" ON "WhatsAppMessages" ("UserId", "Date", "Kind");
+            """;
+        indexWhatsAppMessages.ExecuteNonQuery();
     }
     finally
     {
@@ -7040,6 +7046,7 @@ public sealed class ArxTaskDbContext(DbContextOptions<ArxTaskDbContext> options)
         modelBuilder.Entity<CompanyVisitEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<ReportEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<WhatsAppMessageEntity>().HasKey(item => new { item.UserId, item.Id });
+        modelBuilder.Entity<WhatsAppMessageEntity>().HasIndex(item => new { item.UserId, item.Date, item.Kind }).HasDatabaseName("IX_WhatsAppMessages_UserId_Date_Kind");
         modelBuilder.Entity<OfferEntity>().HasMany(item => item.Items).WithOne().HasForeignKey(item => new { item.UserId, item.OfferId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<InvoiceEntity>().HasMany(item => item.Items).WithOne().HasForeignKey(item => new { item.UserId, item.InvoiceId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<RouteEntity>().HasMany(item => item.Stops).WithOne().HasForeignKey(item => new { item.UserId, item.RouteId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);

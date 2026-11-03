@@ -293,7 +293,7 @@ public sealed class WhatsAppDigestService(
     TimeProvider clock,
     ILogger<WhatsAppDigestService>? logger = null) : IWhatsAppDigestService
 {
-    // Her test mesajı ücretli olduğu için kullanıcı başına günlük gerçek test sınırı.
+    // Kullanıcı başına günlük test sınırı: gerçek gönderim ücretli, dry-run kayıtları da birikmesin.
     const int MaxTestsPerDay = 3;
 
     (DateTime Local, DateOnly Today, string TodayText) Now()
@@ -345,9 +345,9 @@ public sealed class WhatsAppDigestService(
             ?? WhatsAppDigestComposer.ComposeEmpty(user.Name, user.Email);
         if (string.IsNullOrEmpty(user.WhatsAppNumber)) return new WhatsAppTestResult(content.PreviewText, "no-number", null);
 
-        var realTests = await db.WhatsAppMessages.CountAsync(item =>
-            item.UserId == user.Id && item.Date == todayText && item.Kind == "test" && item.Status != "dry-run");
-        if (realTests >= MaxTestsPerDay) return new WhatsAppTestResult(content.PreviewText, "preview-only", null);
+        var testsToday = await db.WhatsAppMessages.CountAsync(item =>
+            item.UserId == user.Id && item.Date == todayText && item.Kind == "test");
+        if (testsToday >= MaxTestsPerDay) return new WhatsAppTestResult(content.PreviewText, "preview-only", null);
 
         var result = await SendAndLog(user, "test", content, todayText);
         return new WhatsAppTestResult(content.PreviewText, result.Status, result.Error);

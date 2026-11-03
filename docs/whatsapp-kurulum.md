@@ -60,4 +60,4 @@ ortam değişkenleri (Edit environment variables) → şunları ekle ve **Save**
   (sunucu bu aralıkta kapalıysa o gün atlanır).
 - Günde en fazla bir sabah özeti; başarısız gönderim o gün tekrar denenmez.
 - Bugün görevi olmayan kullanıcıya mesaj gitmez.
-- Test mesajları planlı özeti engellemez; kullanıcı başına günde en fazla 3 gerçek test.
+- Test mesajları planlı özeti engellemez; kullanıcı başına günde en fazla 3 test (bağlantı yokken de).
