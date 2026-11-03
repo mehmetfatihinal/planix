@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Microsoft.EntityFrameworkCore;
 
 // ---------------------------------------------------------------------------
 // WhatsApp sabah özeti: kullanıcıya kendi seçtiği saatte o günün görevleri.
@@ -273,4 +274,128 @@ public sealed class WhatsAppCloudSender(IHttpClientFactory httpClientFactory, IC
                 }
             }
         });
+}
+
+public sealed record WhatsAppTestResult(string Preview, string Status, string? Error);
+
+public interface IWhatsAppDigestService
+{
+    Task RunDueDigestsAsync();
+    Task<WhatsAppTestResult> SendTestAsync(string userId);
+}
+
+public sealed class WhatsAppDigestService(
+    ArxTaskDbContext db,
+    IWhatsAppSender sender,
+    TimeProvider clock,
+    ILogger<WhatsAppDigestService>? logger = null) : IWhatsAppDigestService
+{
+    // Her test mesajı ücretli olduğu için kullanıcı başına günlük gerçek test sınırı.
+    const int MaxTestsPerDay = 3;
+
+    (DateTime Local, DateOnly Today, string TodayText) Now()
+    {
+        var local = TimeZoneInfo.ConvertTime(clock.GetUtcNow(), AppTime.UserZone).DateTime;
+        var today = DateOnly.FromDateTime(local);
+        return (local, today, today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+    }
+
+    // Hangfire her 5 dakikada çağırır; saati gelen ve o gün henüz almamış kullanıcılara gönderir.
+    public async Task RunDueDigestsAsync()
+    {
+        var (local, today, todayText) = Now();
+        var users = await db.Users.Where(user => user.WhatsAppDigestEnabled && user.WhatsAppNumber != "").ToListAsync();
+        foreach (var user in users)
+        {
+            try
+            {
+                if (!WhatsAppDigestSchedule.ShouldSend(local, user.WhatsAppDigestTime)) continue;
+
+                var statuses = await db.WhatsAppMessages
+                    .Where(item => item.UserId == user.Id && item.Date == todayText && item.Kind == "scheduled")
+                    .Select(item => item.Status)
+                    .ToListAsync();
+                // Gönderilmiş ya da başarısız denenmiş gün tekrar denenmez (zaman aşımında Meta mesajı
+                // iletmiş olabilir). Dry-run günü tüketmez ama bağlantı yokken tekrar kaydedilmez.
+                if (statuses.Any(status => status is "sent" or "failed")) continue;
+                if (statuses.Contains("dry-run") && !sender.IsConfigured) continue;
+
+                var content = WhatsAppDigestComposer.Compose(user.Name, user.Email, await LoadTasks(user.Id), today);
+                if (content is null) continue;
+                await SendAndLog(user, "scheduled", content, todayText);
+            }
+            catch (Exception exception)
+            {
+                // Tek kullanıcıdaki hata diğerlerinin gönderimini durdurmaz.
+                logger?.LogError(exception, "WhatsApp sabah özeti {UserId} için işlenemedi", user.Id);
+            }
+        }
+    }
+
+    public async Task<WhatsAppTestResult> SendTestAsync(string userId)
+    {
+        var user = await db.Users.FindAsync(userId);
+        if (user is null) return new WhatsAppTestResult("", "no-number", "Kullanıcı bulunamadı.");
+
+        var (_, today, todayText) = Now();
+        var content = WhatsAppDigestComposer.Compose(user.Name, user.Email, await LoadTasks(user.Id), today)
+            ?? WhatsAppDigestComposer.ComposeEmpty(user.Name, user.Email);
+        if (string.IsNullOrEmpty(user.WhatsAppNumber)) return new WhatsAppTestResult(content.PreviewText, "no-number", null);
+
+        var realTests = await db.WhatsAppMessages.CountAsync(item =>
+            item.UserId == user.Id && item.Date == todayText && item.Kind == "test" && item.Status != "dry-run");
+        if (realTests >= MaxTestsPerDay) return new WhatsAppTestResult(content.PreviewText, "preview-only", null);
+
+        var result = await SendAndLog(user, "test", content, todayText);
+        return new WhatsAppTestResult(content.PreviewText, result.Status, result.Error);
+    }
+
+    async Task<List<DigestTaskItem>> LoadTasks(string userId)
+    {
+        var companies = await db.Companies.Where(item => item.UserId == userId).ToDictionaryAsync(item => item.Id, item => item.Name);
+        var tasks = await db.Tasks.Where(item => item.UserId == userId && item.Status != "done").ToListAsync();
+        return tasks
+            .Select(item => new DigestTaskItem(
+                item.Title,
+                item.DueDate,
+                item.DueTime,
+                item.Status,
+                item.IsHabit,
+                item.CompanyId is not null && companies.TryGetValue(item.CompanyId, out var name) ? name : null))
+            .ToList();
+    }
+
+    async Task<WhatsAppSendResult> SendAndLog(AppUser user, string kind, WhatsAppDigestContent content, string todayText)
+    {
+        WhatsAppSendResult result;
+        try
+        {
+            result = await sender.SendDigestAsync(user.WhatsAppNumber, content);
+        }
+        catch (Exception exception)
+        {
+            result = new WhatsAppSendResult("failed", null, exception.Message);
+        }
+
+        db.WhatsAppMessages.Add(new WhatsAppMessageEntity
+        {
+            Id = Ids.New("wa"),
+            UserId = user.Id,
+            Date = todayText,
+            Kind = kind,
+            ToNumber = user.WhatsAppNumber,
+            Body = content.PreviewText,
+            Status = result.Status,
+            ProviderMessageId = result.ProviderMessageId,
+            Error = result.Error,
+            CreatedAt = clock.GetUtcNow()
+        });
+        await db.SaveChangesAsync();
+
+        if (result.Status == "dry-run")
+            logger?.LogInformation("WhatsApp dry-run ({Kind}) {UserId}: {Body}", kind, user.Id, content.PreviewText);
+        else if (result.Status == "failed")
+            logger?.LogWarning("WhatsApp gönderimi başarısız ({Kind}) {UserId}: {Error}", kind, user.Id, result.Error);
+        return result;
+    }
 }

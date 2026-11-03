@@ -67,6 +67,8 @@ builder.Services.AddHangfireServer(opts =>
 builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
 builder.Services.AddScoped<IDigestService, DigestService>();
 builder.Services.AddScoped<IWhatsAppSender, WhatsAppCloudSender>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddScoped<IWhatsAppDigestService, WhatsAppDigestService>();
 // Note: the old polling TaskAlertDispatcher BackgroundService is intentionally
 // NOT registered anymore — Hangfire delayed jobs replace it.
 
@@ -137,6 +139,12 @@ using (var scope = app.Services.CreateScope())
         "weekly-digest",
         svc => svc.SendWeeklyDigestsAsync(),
         app.Configuration["Digest:WeeklyCron"] ?? "0 17 * * 5",
+        new RecurringJobOptions { TimeZone = AppTime.UserZone });
+    // WhatsApp sabah özeti: her kullanıcı kendi saatini seçer, iş 5 dakikada bir saati geleni gönderir.
+    recurringJobs.AddOrUpdate<IWhatsAppDigestService>(
+        "whatsapp-digest",
+        svc => svc.RunDueDigestsAsync(),
+        app.Configuration["Digest:WhatsAppCron"] ?? "*/5 * * * *",
         new RecurringJobOptions { TimeZone = AppTime.UserZone });
 }
 
@@ -724,6 +732,10 @@ app.MapPut("/settings", [Authorize] async (ClaimsPrincipal principal, UserSettin
     await db.SaveChangesAsync();
     return Results.Ok(UserSettingsDto.From(user));
 });
+
+// WhatsApp sabah özetinin bugünkü metni; bağlantı varsa gerçekten gönderilir (günde en fazla 3).
+app.MapPost("/settings/whatsapp/test", [Authorize] async (ClaimsPrincipal principal, IWhatsAppDigestService whatsApp) =>
+    Results.Ok(await whatsApp.SendTestAsync(principal.UserId())));
 
 // --- Gerçek PDF üretimi (teklif + fatura) ------------------------------------
 
