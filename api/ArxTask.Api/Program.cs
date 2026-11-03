@@ -7032,6 +7032,10 @@ public sealed class AppUser
     public string HomeAddress { get; set; } = "";
     public bool DailyDigestEnabled { get; set; } = true;
     public bool WeeklyDigestEnabled { get; set; } = true;
+    // WhatsApp sabah özeti: E.164 numara, aç/kapa ve kullanıcının seçtiği saat (HH:mm, Türkiye saati).
+    public string WhatsAppNumber { get; set; } = "";
+    public bool WhatsAppDigestEnabled { get; set; }
+    public string WhatsAppDigestTime { get; set; } = "08:00";
 }
 
 public sealed class CompanyEntity : IOwnedEntity
