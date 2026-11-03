@@ -7,7 +7,8 @@ import type {
   RouteErrandResponse,
   ShoppingItem,
   Task,
-  UserSettings
+  UserSettings,
+  WhatsAppTestResult
 } from "@/types/business";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
@@ -347,6 +348,10 @@ export function getSettings(token: string) {
 
 export function updateSettings(token: string, input: Partial<UserSettings>) {
   return apiRequest<UserSettings>("/settings", { method: "PUT", body: JSON.stringify(input) }, token);
+}
+
+export function sendWhatsAppTest(token: string) {
+  return apiRequest<WhatsAppTestResult>("/settings/whatsapp/test", { method: "POST", body: "{}" }, token);
 }
 
 export function assignAdminTask(token: string, input: AssignTaskInput) {

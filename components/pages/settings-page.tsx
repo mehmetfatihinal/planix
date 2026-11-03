@@ -1,18 +1,32 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Bell, Building2, Check, Home, MapPin, Save } from "lucide-react";
+import { Bell, Building2, Check, Home, MapPin, MessageCircle, Save, Send } from "lucide-react";
 import { useAppState } from "@/lib/app-state";
 import { cn } from "@/lib/utils";
 import { Badge, Button, Card, PageHeader, SectionTitle } from "@/components/ui/ui-kit";
+import type { WhatsAppTestResult, WhatsAppTestStatus } from "@/types/business";
 
 const REMINDER_PRESETS = [15, 30, 60, 120];
 
+const WHATSAPP_STATUS_KEYS: Record<WhatsAppTestStatus, string> = {
+  sent: "settings.whatsapp.status.sent",
+  "dry-run": "settings.whatsapp.status.dryRun",
+  failed: "settings.whatsapp.status.failed",
+  "preview-only": "settings.whatsapp.status.previewOnly",
+  "no-number": "settings.whatsapp.status.noNumber"
+};
+
 export function SettingsPage() {
-  const { t, settings, updateSettings } = useAppState();
+  const { t, settings, updateSettings, sendWhatsAppTest } = useAppState();
   const [reminderLead, setReminderLead] = useState("30");
   const [dailyDigest, setDailyDigest] = useState(false);
   const [weeklyDigest, setWeeklyDigest] = useState(false);
+  const [whatsAppNumber, setWhatsAppNumber] = useState("");
+  const [whatsAppEnabled, setWhatsAppEnabled] = useState(false);
+  const [whatsAppTime, setWhatsAppTime] = useState("08:00");
+  const [whatsAppTesting, setWhatsAppTesting] = useState(false);
+  const [whatsAppResult, setWhatsAppResult] = useState<WhatsAppTestResult | null>(null);
   const [homeAddress, setHomeAddress] = useState("");
   const [homeLatitude, setHomeLatitude] = useState<number | null>(null);
   const [homeLongitude, setHomeLongitude] = useState<number | null>(null);
@@ -34,6 +48,9 @@ export function SettingsPage() {
     setReminderLead(String(settings.defaultReminderLeadMinutes ?? 30));
     setDailyDigest(settings.dailyDigestEnabled);
     setWeeklyDigest(settings.weeklyDigestEnabled);
+    setWhatsAppNumber(settings.whatsAppNumber ?? "");
+    setWhatsAppEnabled(settings.whatsAppDigestEnabled);
+    setWhatsAppTime(settings.whatsAppDigestTime || "08:00");
     setHomeAddress(settings.homeAddress ?? "");
     setHomeLatitude(settings.homeLatitude ?? null);
     setHomeLongitude(settings.homeLongitude ?? null);
@@ -70,7 +87,7 @@ export function SettingsPage() {
     );
   }
 
-  async function save() {
+  async function save(): Promise<boolean> {
     setSaving(true);
     setErrorMessage(null);
     try {
@@ -79,6 +96,9 @@ export function SettingsPage() {
         defaultReminderLeadMinutes: Number.isFinite(parsedLead) ? parsedLead : null,
         dailyDigestEnabled: dailyDigest,
         weeklyDigestEnabled: weeklyDigest,
+        whatsAppNumber: whatsAppNumber.trim(),
+        whatsAppDigestEnabled: whatsAppEnabled,
+        whatsAppDigestTime: whatsAppTime,
         homeAddress: homeAddress.trim() || null,
         homeLatitude,
         homeLongitude,
@@ -91,10 +111,26 @@ export function SettingsPage() {
         paymentTerms: paymentTerms.trim() || null
       });
       setSavedAt(Date.now());
+      return true;
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("settings.saveError"));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Test, ekrandaki numara/saat kaydedildikten sonra gönderilir.
+  async function testWhatsApp() {
+    setWhatsAppTesting(true);
+    setWhatsAppResult(null);
+    try {
+      if (!(await save())) return;
+      setWhatsAppResult(await sendWhatsAppTest());
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("settings.saveError"));
     } finally {
-      setSaving(false);
+      setWhatsAppTesting(false);
     }
   }
 
@@ -154,6 +190,55 @@ export function SettingsPage() {
           <ToggleRow label={t("settings.dailyDigest")} checked={dailyDigest} onChange={setDailyDigest} />
           <ToggleRow label={t("settings.weeklyDigest")} checked={weeklyDigest} onChange={setWeeklyDigest} />
         </div>
+      </Card>
+
+      <Card>
+        <SectionTitle title={t("settings.whatsapp.title")} subtitle={t("settings.whatsapp.hint")} icon={MessageCircle} />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <span className="text-sm font-medium text-text dark:text-[#F5F0EA]">{t("settings.whatsapp.number")}</span>
+            <input
+              type="tel"
+              inputMode="tel"
+              autoComplete="tel"
+              placeholder={t("settings.whatsapp.numberPlaceholder")}
+              value={whatsAppNumber}
+              onChange={(event) => setWhatsAppNumber(event.target.value)}
+              className="mt-2 min-h-11 w-full rounded-xl border border-[#E5D8C7] bg-white px-3 text-sm outline-none focus:border-primary/40 dark:border-darkBorder dark:bg-[#242424]"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-text dark:text-[#F5F0EA]">{t("settings.whatsapp.time")}</span>
+            <input
+              type="time"
+              step={900}
+              value={whatsAppTime}
+              onChange={(event) => setWhatsAppTime(event.target.value)}
+              className="mt-2 min-h-11 w-full rounded-xl border border-[#E5D8C7] bg-white px-3 text-sm outline-none focus:border-primary/40 dark:border-darkBorder dark:bg-[#242424]"
+            />
+          </label>
+        </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <ToggleRow label={t("settings.whatsapp.enabled")} checked={whatsAppEnabled} onChange={setWhatsAppEnabled} />
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button variant="secondary" onClick={() => void testWhatsApp()} disabled={whatsAppTesting || saving}>
+            <Send size={16} />
+            {whatsAppTesting ? t("settings.whatsapp.testing") : t("settings.whatsapp.test")}
+          </Button>
+        </div>
+        {whatsAppResult ? (
+          <div className="mt-4 space-y-2 rounded-2xl border border-[#E5D8C7] bg-white p-4 text-sm dark:border-darkBorder dark:bg-[#242424]">
+            <p className={cn("font-medium", whatsAppResult.status === "failed" ? "text-danger" : "text-text dark:text-[#F5F0EA]")}>
+              {t(WHATSAPP_STATUS_KEYS[whatsAppResult.status] ?? "settings.whatsapp.status.failed", { error: whatsAppResult.error ?? "" })}
+            </p>
+            {whatsAppResult.preview ? (
+              <p className="text-muted dark:text-darkMuted">
+                <span className="font-medium">{t("settings.whatsapp.preview")}:</span> {whatsAppResult.preview}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </Card>
 
       <Card>

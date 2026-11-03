@@ -66,6 +66,9 @@ builder.Services.AddHangfireServer(opts =>
 });
 builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
 builder.Services.AddScoped<IDigestService, DigestService>();
+builder.Services.AddScoped<IWhatsAppSender, WhatsAppCloudSender>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddScoped<IWhatsAppDigestService, WhatsAppDigestService>();
 // Note: the old polling TaskAlertDispatcher BackgroundService is intentionally
 // NOT registered anymore — Hangfire delayed jobs replace it.
 
@@ -136,6 +139,12 @@ using (var scope = app.Services.CreateScope())
         "weekly-digest",
         svc => svc.SendWeeklyDigestsAsync(),
         app.Configuration["Digest:WeeklyCron"] ?? "0 17 * * 5",
+        new RecurringJobOptions { TimeZone = AppTime.UserZone });
+    // WhatsApp sabah özeti: her kullanıcı kendi saatini seçer, iş 5 dakikada bir saati geleni gönderir.
+    recurringJobs.AddOrUpdate<IWhatsAppDigestService>(
+        "whatsapp-digest",
+        svc => svc.RunDueDigestsAsync(),
+        app.Configuration["Digest:WhatsAppCron"] ?? "*/5 * * * *",
         new RecurringJobOptions { TimeZone = AppTime.UserZone });
 }
 
@@ -703,6 +712,9 @@ app.MapPut("/settings", [Authorize] async (ClaimsPrincipal principal, UserSettin
 {
     var user = await db.Users.FindAsync(principal.UserId());
     if (user is null) return Results.Unauthorized();
+    // WhatsApp alanları önce doğrulanır: hata varsa hiçbir ayar kaydedilmez.
+    var whatsAppError = WhatsAppSettingsRules.Apply(user, request.WhatsAppNumber, request.WhatsAppDigestEnabled, request.WhatsAppDigestTime);
+    if (whatsAppError is not null) return Results.BadRequest(new { message = whatsAppError });
     if (request.Name is not null && !string.IsNullOrWhiteSpace(request.Name)) user.Name = request.Name.Trim();
     if (request.CompanyName is not null) user.CompanyName = request.CompanyName.Trim();
     if (request.CompanyAddress is not null) user.CompanyAddress = request.CompanyAddress.Trim();
@@ -720,6 +732,10 @@ app.MapPut("/settings", [Authorize] async (ClaimsPrincipal principal, UserSettin
     await db.SaveChangesAsync();
     return Results.Ok(UserSettingsDto.From(user));
 });
+
+// WhatsApp sabah özetinin bugünkü metni; bağlantı varsa gerçekten gönderilir (günde en fazla 3).
+app.MapPost("/settings/whatsapp/test", [Authorize] async (ClaimsPrincipal principal, IWhatsAppDigestService whatsApp) =>
+    Results.Ok(await whatsApp.SendTestAsync(principal.UserId())));
 
 // --- Gerçek PDF üretimi (teklif + fatura) ------------------------------------
 
@@ -1476,6 +1492,9 @@ static void EnsureSqliteSchema(ArxTaskDbContext db)
         EnsureColumn(connection, "Users", "HomeAddress", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "Users", "DailyDigestEnabled", "INTEGER NOT NULL DEFAULT 1");
         EnsureColumn(connection, "Users", "WeeklyDigestEnabled", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn(connection, "Users", "WhatsAppNumber", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "Users", "WhatsAppDigestEnabled", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "Users", "WhatsAppDigestTime", "TEXT NOT NULL DEFAULT '08:00'");
 
         // Adres doğrulama (R3).
         EnsureColumn(connection, "Companies", "FormattedAddress", "TEXT NOT NULL DEFAULT ''");
@@ -1629,6 +1648,24 @@ static void EnsureSqliteSchema(ArxTaskDbContext db)
             );
             """;
         createReports.ExecuteNonQuery();
+
+        using var createWhatsAppMessages = connection.CreateCommand();
+        createWhatsAppMessages.CommandText = """
+            CREATE TABLE IF NOT EXISTS "WhatsAppMessages" (
+                "UserId" TEXT NOT NULL,
+                "Id" TEXT NOT NULL,
+                "Date" TEXT NOT NULL,
+                "Kind" TEXT NOT NULL,
+                "ToNumber" TEXT NOT NULL,
+                "Body" TEXT NOT NULL,
+                "Status" TEXT NOT NULL,
+                "ProviderMessageId" TEXT NULL,
+                "Error" TEXT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                CONSTRAINT "PK_WhatsAppMessages" PRIMARY KEY ("UserId", "Id")
+            );
+            """;
+        createWhatsAppMessages.ExecuteNonQuery();
     }
     finally
     {
@@ -6976,6 +7013,7 @@ public sealed class ArxTaskDbContext(DbContextOptions<ArxTaskDbContext> options)
     public DbSet<ShoppingItemEntity> ShoppingItems => Set<ShoppingItemEntity>();
     public DbSet<CompanyVisitEntity> CompanyVisits => Set<CompanyVisitEntity>();
     public DbSet<ReportEntity> Reports => Set<ReportEntity>();
+    public DbSet<WhatsAppMessageEntity> WhatsAppMessages => Set<WhatsAppMessageEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -7001,6 +7039,7 @@ public sealed class ArxTaskDbContext(DbContextOptions<ArxTaskDbContext> options)
         modelBuilder.Entity<ShoppingItemEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<CompanyVisitEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<ReportEntity>().HasKey(item => new { item.UserId, item.Id });
+        modelBuilder.Entity<WhatsAppMessageEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<OfferEntity>().HasMany(item => item.Items).WithOne().HasForeignKey(item => new { item.UserId, item.OfferId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<InvoiceEntity>().HasMany(item => item.Items).WithOne().HasForeignKey(item => new { item.UserId, item.InvoiceId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<RouteEntity>().HasMany(item => item.Stops).WithOne().HasForeignKey(item => new { item.UserId, item.RouteId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
@@ -7032,6 +7071,10 @@ public sealed class AppUser
     public string HomeAddress { get; set; } = "";
     public bool DailyDigestEnabled { get; set; } = true;
     public bool WeeklyDigestEnabled { get; set; } = true;
+    // WhatsApp sabah özeti: E.164 numara, aç/kapa ve kullanıcının seçtiği saat (HH:mm, Türkiye saati).
+    public string WhatsAppNumber { get; set; } = "";
+    public bool WhatsAppDigestEnabled { get; set; }
+    public string WhatsAppDigestTime { get; set; } = "08:00";
 }
 
 public sealed class CompanyEntity : IOwnedEntity
@@ -7459,7 +7502,10 @@ public sealed record UserSettingsRequest(
     double? HomeLongitude = null,
     string? HomeAddress = null,
     bool? DailyDigestEnabled = null,
-    bool? WeeklyDigestEnabled = null);
+    bool? WeeklyDigestEnabled = null,
+    string? WhatsAppNumber = null,
+    bool? WhatsAppDigestEnabled = null,
+    string? WhatsAppDigestTime = null);
 
 public sealed record UserSettingsDto(
     string Id,
@@ -7477,7 +7523,10 @@ public sealed record UserSettingsDto(
     double HomeLongitude,
     string HomeAddress,
     bool DailyDigestEnabled,
-    bool WeeklyDigestEnabled)
+    bool WeeklyDigestEnabled,
+    string WhatsAppNumber,
+    bool WhatsAppDigestEnabled,
+    string WhatsAppDigestTime)
 {
     public static UserSettingsDto From(AppUser user) => new(
         user.Id,
@@ -7495,7 +7544,10 @@ public sealed record UserSettingsDto(
         user.HomeLongitude,
         user.HomeAddress,
         user.DailyDigestEnabled,
-        user.WeeklyDigestEnabled);
+        user.WeeklyDigestEnabled,
+        user.WhatsAppNumber,
+        user.WhatsAppDigestEnabled,
+        user.WhatsAppDigestTime);
 }
 
 public sealed record AssignTaskRequest(

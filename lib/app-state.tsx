@@ -37,6 +37,7 @@ import {
   scanDocumentRequest,
   snoozeTaskRequest,
   updateSettings as updateSettingsRequest,
+  sendWhatsAppTest as sendWhatsAppTestRequest,
   updateShoppingItemRequest,
   verifyCompanyAddressRequest,
   type AssignTaskInput,
@@ -71,6 +72,7 @@ import type {
   Task,
   ThemeMode,
   UserSettings,
+  WhatsAppTestResult,
   WorkModule
 } from "@/types/business";
 
@@ -103,6 +105,7 @@ interface AppStateContextValue {
   assignTask: (input: AssignTaskInput) => Promise<void>;
   refreshSettings: () => Promise<void>;
   updateSettings: (input: Partial<UserSettings>) => Promise<void>;
+  sendWhatsAppTest: () => Promise<WhatsAppTestResult>;
   verifyCompanyAddress: (companyId: string) => Promise<{ company: Company; verified: boolean }>;
   geocodeMissingCompanies: () => Promise<{ checkedCount: number; verifiedCount: number }>;
   offerFromUrl: (input: { url: string; companyId?: string | null; title?: string | null }) => Promise<OfferFromUrlResponse>;
@@ -265,6 +268,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     },
     [token]
   );
+
+  const sendWhatsAppTest = useCallback(async () => {
+    if (!token) throw new Error("Not signed in");
+    return sendWhatsAppTestRequest(token);
+  }, [token]);
 
   const t = useCallback(
     (key: string, params?: Record<string, string | number>) => translate(language, key, params),
@@ -645,6 +653,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       assignTask,
       refreshSettings,
       updateSettings,
+      sendWhatsAppTest,
       verifyCompanyAddress,
       geocodeMissingCompanies,
       offerFromUrl,
@@ -747,6 +756,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       updateCompany,
       updateOffer,
       updateSettings,
+      sendWhatsAppTest,
       updateShoppingItem,
       updateTask,
       verifyCompanyAddress

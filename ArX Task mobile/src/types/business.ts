@@ -235,6 +235,9 @@ export interface AppSettings {
   homeAddress: string | null;
   dailyDigestEnabled: boolean;
   weeklyDigestEnabled: boolean;
+  whatsAppNumber: string;
+  whatsAppDigestEnabled: boolean;
+  whatsAppDigestTime: string;
   companyName: string | null;
   companyAddress: string | null;
   companyPhone: string | null;
@@ -516,4 +519,12 @@ export interface RouteOpportunity {
   distanceMeters: number;
   companyId?: string;
   taskId?: string;
+}
+
+export type WhatsAppTestStatus = "sent" | "dry-run" | "failed" | "preview-only" | "no-number";
+
+export interface WhatsAppTestResult {
+  preview: string;
+  status: WhatsAppTestStatus;
+  error: string | null;
 }
