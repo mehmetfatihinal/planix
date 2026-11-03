@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Bell, Building2, Check, Home, MapPin, MessageCircle, Save, Send } from "lucide-react";
 import { useAppState } from "@/lib/app-state";
 import { cn } from "@/lib/utils";
+import { whatsAppSettingsPatch } from "@/lib/whatsapp-settings";
 import { Badge, Button, Card, PageHeader, SectionTitle } from "@/components/ui/ui-kit";
 import type { WhatsAppTestResult, WhatsAppTestStatus } from "@/types/business";
 
@@ -96,9 +97,7 @@ export function SettingsPage() {
         defaultReminderLeadMinutes: Number.isFinite(parsedLead) ? parsedLead : null,
         dailyDigestEnabled: dailyDigest,
         weeklyDigestEnabled: weeklyDigest,
-        whatsAppNumber: whatsAppNumber.trim(),
-        whatsAppDigestEnabled: whatsAppEnabled,
-        whatsAppDigestTime: whatsAppTime,
+        ...whatsAppSettingsPatch(whatsAppNumber, whatsAppEnabled, whatsAppTime),
         homeAddress: homeAddress.trim() || null,
         homeLatitude,
         homeLongitude,
@@ -203,7 +202,10 @@ export function SettingsPage() {
               autoComplete="tel"
               placeholder={t("settings.whatsapp.numberPlaceholder")}
               value={whatsAppNumber}
-              onChange={(event) => setWhatsAppNumber(event.target.value)}
+              onChange={(event) => {
+                setWhatsAppNumber(event.target.value);
+                if (!event.target.value.trim()) setWhatsAppEnabled(false);
+              }}
               className="mt-2 min-h-11 w-full rounded-xl border border-[#E5D8C7] bg-white px-3 text-sm outline-none focus:border-primary/40 dark:border-darkBorder dark:bg-[#242424]"
             />
           </label>

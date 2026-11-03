@@ -236,6 +236,24 @@ public sealed class WhatsAppDigestServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Test_limit_counts_dry_run_tests()
+    {
+        // Bağlantı yokken de test kayıtları günde 3'ten fazla birikmez.
+        sender.IsConfigured = false;
+        for (var i = 0; i < 3; i++) Assert.Equal("dry-run", (await service.SendTestAsync(UserId)).Status);
+        Assert.Equal("preview-only", (await service.SendTestAsync(UserId)).Status);
+        Assert.Equal(3, Log().Count);
+    }
+
+    [Fact]
+    public void Messages_are_indexed_for_daily_lookup()
+    {
+        var entity = db.Model.FindEntityType(typeof(WhatsAppMessageEntity))!;
+        Assert.Contains(entity.GetIndexes(), index =>
+            index.Properties.Select(property => property.Name).SequenceEqual(["UserId", "Date", "Kind"]));
+    }
+
+    [Fact]
     public async Task Test_without_tasks_sends_empty_text()
     {
         var result = await service.SendTestAsync(UserId);
