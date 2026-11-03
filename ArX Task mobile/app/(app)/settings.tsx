@@ -3,12 +3,23 @@ import { Alert, Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { AppHeader } from "@/components/app-header";
 import { LanguageSwitcher } from "@/components/language-switcher";
 import { Card, Chip, GhostButton, PrimaryButton, Screen, TextField, colors } from "@/components/ui";
+import { sendWhatsAppTest } from "@/lib/api";
 import { useAppData } from "@/lib/app-data-context";
 import { useAuth } from "@/lib/auth-context";
 import { useI18n } from "@/lib/i18n";
 import { getCurrentUserLocation, hasUsableCoordinates } from "@/lib/location";
 import { useUserLocation } from "@/lib/location-context";
 import { ensureMobilePushRegistration, getNotificationPermission, loadMobileNotificationStatus } from "@/lib/notifications";
+import { shiftDigestTime } from "@/lib/whatsapp-time";
+import type { WhatsAppTestResult, WhatsAppTestStatus } from "@/types/business";
+
+const WHATSAPP_STATUS_TEXT: Record<WhatsAppTestStatus, string> = {
+  sent: "Test mesajı WhatsApp'tan gönderildi.",
+  "dry-run": "WhatsApp bağlantısı henüz kurulmadı; mesaj gönderilmedi, yalnızca kaydedildi.",
+  failed: "Mesaj gönderilemedi.",
+  "preview-only": "Bugünkü test sınırına (3) ulaştın; yalnızca önizleme gösteriliyor.",
+  "no-number": "Önce WhatsApp numaranı girip kaydet."
+};
 
 const REMINDER_LEAD_OPTIONS = [15, 30, 60, 120];
 
@@ -39,6 +50,10 @@ export default function SettingsScreen() {
     paymentTerms: ""
   });
   const [savingCompany, setSavingCompany] = useState(false);
+  const [whatsAppNumberDraft, setWhatsAppNumberDraft] = useState("");
+  const [savingWhatsApp, setSavingWhatsApp] = useState(false);
+  const [testingWhatsApp, setTestingWhatsApp] = useState(false);
+  const [whatsAppResult, setWhatsAppResult] = useState<WhatsAppTestResult | null>(null);
 
   useEffect(() => {
     getNotificationPermission().then((result) => setPermission(result.status));
@@ -50,6 +65,7 @@ export default function SettingsScreen() {
   useEffect(() => {
     if (!settings) return;
     setLeadMinutesDraft(String(settings.defaultReminderLeadMinutes ?? 30));
+    setWhatsAppNumberDraft(settings.whatsAppNumber ?? "");
     setCompanyDraft({
       companyName: settings.companyName ?? "",
       companyAddress: settings.companyAddress ?? "",
@@ -105,6 +121,36 @@ export default function SettingsScreen() {
       Alert.alert("Kaydedilemedi", error instanceof Error ? error.message : "Özet ayarı güncellenemedi.");
     } finally {
       setSavingDigest(false);
+    }
+  }
+
+  async function saveWhatsApp(patch: { whatsAppNumber?: string; whatsAppDigestEnabled?: boolean; whatsAppDigestTime?: string }) {
+    setSavingWhatsApp(true);
+    try {
+      await updateSettings(patch);
+      return true;
+    } catch (error) {
+      Alert.alert("Kaydedilemedi", error instanceof Error ? error.message : "WhatsApp ayarı güncellenemedi.");
+      return false;
+    } finally {
+      setSavingWhatsApp(false);
+    }
+  }
+
+  // Test, ekrandaki numara kaydedildikten sonra gönderilir.
+  async function testWhatsApp() {
+    if (!token) return;
+    setTestingWhatsApp(true);
+    setWhatsAppResult(null);
+    try {
+      if (whatsAppNumberDraft.trim() !== (settings?.whatsAppNumber ?? "")) {
+        if (!(await saveWhatsApp({ whatsAppNumber: whatsAppNumberDraft.trim() }))) return;
+      }
+      setWhatsAppResult(await sendWhatsAppTest(token));
+    } catch (error) {
+      Alert.alert("Test gönderilemedi", error instanceof Error ? error.message : "Bilinmeyen hata.");
+    } finally {
+      setTestingWhatsApp(false);
     }
   }
 
@@ -217,6 +263,57 @@ export default function SettingsScreen() {
             thumbColor="#fff"
           />
         </View>
+      </Card>
+
+      <Card>
+        <Text style={styles.sectionTitle}>WhatsApp sabah özeti</Text>
+        <Text style={styles.sectionHint}>Seçtiğin saatte o günün görevleri WhatsApp numarana gelir.</Text>
+        <TextField
+          label="WhatsApp numaram"
+          value={whatsAppNumberDraft}
+          onChangeText={setWhatsAppNumberDraft}
+          keyboardType="phone-pad"
+          placeholder="0532 123 45 67"
+        />
+        <PrimaryButton
+          label={savingWhatsApp ? "Kaydediliyor..." : "Numarayı kaydet"}
+          loading={savingWhatsApp}
+          onPress={() => void saveWhatsApp({ whatsAppNumber: whatsAppNumberDraft.trim() })}
+        />
+        <View style={styles.toggleRow}>
+          <Text style={styles.toggleLabel}>Sabah WhatsApp özeti</Text>
+          <Switch
+            value={Boolean(settings?.whatsAppDigestEnabled)}
+            onValueChange={(value) => void saveWhatsApp({ whatsAppDigestEnabled: value })}
+            disabled={savingWhatsApp || !settings}
+            trackColor={{ true: colors.primary, false: colors.borderStrong }}
+            thumbColor="#fff"
+          />
+        </View>
+        <View style={styles.toggleRow}>
+          <Text style={styles.toggleLabel}>Gönderim saati</Text>
+          <View style={styles.timeStepper}>
+            <GhostButton
+              label="−15 dk"
+              onPress={() => void saveWhatsApp({ whatsAppDigestTime: shiftDigestTime(settings?.whatsAppDigestTime ?? "08:00", -15) })}
+            />
+            <Text style={styles.timeValue}>{settings?.whatsAppDigestTime ?? "08:00"}</Text>
+            <GhostButton
+              label="+15 dk"
+              onPress={() => void saveWhatsApp({ whatsAppDigestTime: shiftDigestTime(settings?.whatsAppDigestTime ?? "08:00", 15) })}
+            />
+          </View>
+        </View>
+        <GhostButton label={testingWhatsApp ? "Gönderiliyor..." : "Test mesajı gönder"} onPress={testingWhatsApp ? undefined : () => void testWhatsApp()} />
+        {whatsAppResult ? (
+          <View style={styles.whatsAppResult}>
+            <Text style={styles.toggleLabel}>
+              {WHATSAPP_STATUS_TEXT[whatsAppResult.status] ?? "Mesaj gönderilemedi."}
+              {whatsAppResult.status === "failed" && whatsAppResult.error ? ` ${whatsAppResult.error}` : ""}
+            </Text>
+            {whatsAppResult.preview ? <Text style={styles.sectionHint}>{whatsAppResult.preview}</Text> : null}
+          </View>
+        ) : null}
       </Card>
 
       <Card>
@@ -351,6 +448,26 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 14,
     fontWeight: "500"
+  },
+  timeStepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8
+  },
+  timeValue: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: "600",
+    minWidth: 52,
+    textAlign: "center"
+  },
+  whatsAppResult: {
+    gap: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+    padding: 12
   },
   metricRow: {
     flexDirection: "row",

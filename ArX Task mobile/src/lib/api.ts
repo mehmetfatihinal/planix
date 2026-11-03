@@ -23,6 +23,7 @@ import type {
   Task,
   UploadedFile,
   WeeklyAnalysisReport,
+  WhatsAppTestResult,
   WorkModule
 } from "@/types/business";
 
@@ -170,6 +171,11 @@ export async function getSettings(token: string) {
 
 export async function updateSettings(token: string, patch: Partial<AppSettings>) {
   return apiRequest<AppSettings>("/settings", { method: "PUT", body: JSON.stringify(patch) }, token);
+}
+
+// WhatsApp sabah özetinin bugünkü metni; bağlantı varsa gerçekten gönderilir (günde en fazla 3).
+export async function sendWhatsAppTest(token: string) {
+  return apiRequest<WhatsAppTestResult>("/settings/whatsapp/test", { method: "POST", body: "{}" }, token);
 }
 
 // --- Files (multipart upload; NOT JSON, so it bypasses apiRequest) ---
