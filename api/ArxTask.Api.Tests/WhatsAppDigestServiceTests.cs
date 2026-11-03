@@ -134,6 +134,39 @@ public sealed class WhatsAppDigestServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task In_flight_send_blocks_overlapping_run()
+    {
+        // Başka bir (üst üste binen) çalıştırma bu kullanıcı için gönderime başlamış.
+        AddTask("Ara");
+        db.WhatsAppMessages.Add(new WhatsAppMessageEntity
+        {
+            Id = "wa-inflight", UserId = UserId, Date = "2026-11-03", Kind = "scheduled",
+            ToNumber = "+905321234567", Body = "", Status = "sending", CreatedAt = clock.GetUtcNow()
+        });
+        db.SaveChanges();
+        At("2026-11-03 08:05");
+        await service.RunDueDigestsAsync();
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task Record_is_reserved_before_sending()
+    {
+        AddTask("Ara");
+        string? statusSeenDuringSend = null;
+        sender.OnSend = () =>
+        {
+            using var other = new ArxTaskDbContext(new DbContextOptionsBuilder<ArxTaskDbContext>().UseSqlite(connection).Options);
+            statusSeenDuringSend = other.WhatsAppMessages.Select(item => item.Status).SingleOrDefault();
+        };
+        At("2026-11-03 08:05");
+        await service.RunDueDigestsAsync();
+
+        Assert.Equal("sending", statusSeenDuringSend);
+        Assert.Equal("sent", Assert.Single(Log()).Status);
+    }
+
+    [Fact]
     public async Task Dry_run_logged_once_per_day()
     {
         AddTask("Ara");
@@ -241,10 +274,12 @@ sealed class FakeSender : IWhatsAppSender
     public bool IsConfigured { get; set; } = true;
     public string NextStatus { get; set; } = "sent";
     public bool Throw { get; set; }
+    public Action? OnSend { get; set; }
     public List<(string To, WhatsAppDigestContent Content)> Sent { get; } = [];
 
     public Task<WhatsAppSendResult> SendDigestAsync(string toE164, WhatsAppDigestContent content, CancellationToken ct = default)
     {
+        OnSend?.Invoke();
         if (Throw) throw new InvalidOperationException("boom");
         if (!IsConfigured) return Task.FromResult(new WhatsAppSendResult("dry-run", null, null));
         Sent.Add((toE164, content));

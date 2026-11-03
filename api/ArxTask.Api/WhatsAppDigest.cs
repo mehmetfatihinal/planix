@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
 
 // ---------------------------------------------------------------------------
@@ -182,7 +183,7 @@ public sealed class WhatsAppMessageEntity : IOwnedEntity
     public string Kind { get; set; } = "scheduled"; // scheduled | test
     public string ToNumber { get; set; } = "";
     public string Body { get; set; } = "";
-    public string Status { get; set; } = "";        // sent | dry-run | failed
+    public string Status { get; set; } = "";        // sending | sent | dry-run | failed
     public string? ProviderMessageId { get; set; }
     public string? Error { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
@@ -280,6 +281,8 @@ public sealed record WhatsAppTestResult(string Preview, string Status, string? E
 
 public interface IWhatsAppDigestService
 {
+    // Hangfire her tick'te yeni örnek kuyruğa alır; önceki çalışma sürerken ikincisi beklesin.
+    [DisableConcurrentExecution(timeoutInSeconds: 240)]
     Task RunDueDigestsAsync();
     Task<WhatsAppTestResult> SendTestAsync(string userId);
 }
@@ -317,7 +320,7 @@ public sealed class WhatsAppDigestService(
                     .ToListAsync();
                 // Gönderilmiş ya da başarısız denenmiş gün tekrar denenmez (zaman aşımında Meta mesajı
                 // iletmiş olabilir). Dry-run günü tüketmez ama bağlantı yokken tekrar kaydedilmez.
-                if (statuses.Any(status => status is "sent" or "failed")) continue;
+                if (statuses.Any(status => status is "sent" or "failed" or "sending")) continue;
                 if (statuses.Contains("dry-run") && !sender.IsConfigured) continue;
 
                 var content = WhatsAppDigestComposer.Compose(user.Name, user.Email, await LoadTasks(user.Id), today);
@@ -367,6 +370,22 @@ public sealed class WhatsAppDigestService(
 
     async Task<WhatsAppSendResult> SendAndLog(AppUser user, string kind, WhatsAppDigestContent content, string todayText)
     {
+        // Kayıt göndermeden ÖNCE "sending" olarak ayrılır: üst üste binen bir çalıştırma bunu görüp
+        // atlar, gönderim sonrası kayıt yazılamazsa da gün tüketilmiş kalır (çift mesaj olmaz).
+        var entry = new WhatsAppMessageEntity
+        {
+            Id = Ids.New("wa"),
+            UserId = user.Id,
+            Date = todayText,
+            Kind = kind,
+            ToNumber = user.WhatsAppNumber,
+            Body = content.PreviewText,
+            Status = "sending",
+            CreatedAt = clock.GetUtcNow()
+        };
+        db.WhatsAppMessages.Add(entry);
+        await db.SaveChangesAsync();
+
         WhatsAppSendResult result;
         try
         {
@@ -377,19 +396,9 @@ public sealed class WhatsAppDigestService(
             result = new WhatsAppSendResult("failed", null, exception.Message);
         }
 
-        db.WhatsAppMessages.Add(new WhatsAppMessageEntity
-        {
-            Id = Ids.New("wa"),
-            UserId = user.Id,
-            Date = todayText,
-            Kind = kind,
-            ToNumber = user.WhatsAppNumber,
-            Body = content.PreviewText,
-            Status = result.Status,
-            ProviderMessageId = result.ProviderMessageId,
-            Error = result.Error,
-            CreatedAt = clock.GetUtcNow()
-        });
+        entry.Status = result.Status;
+        entry.ProviderMessageId = result.ProviderMessageId;
+        entry.Error = result.Error;
         await db.SaveChangesAsync();
 
         if (result.Status == "dry-run")
