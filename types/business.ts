@@ -359,6 +359,17 @@ export interface UserSettings {
   homeAddress: string | null;
   dailyDigestEnabled: boolean;
   weeklyDigestEnabled: boolean;
+  whatsAppNumber: string;
+  whatsAppDigestEnabled: boolean;
+  whatsAppDigestTime: string;
+}
+
+export type WhatsAppTestStatus = "sent" | "dry-run" | "failed" | "preview-only" | "no-number";
+
+export interface WhatsAppTestResult {
+  preview: string;
+  status: WhatsAppTestStatus;
+  error: string | null;
 }
 
 export type ShoppingItemStatus = "open" | "done";
