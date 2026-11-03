@@ -1649,23 +1649,7 @@ static void EnsureSqliteSchema(ArxTaskDbContext db)
             """;
         createReports.ExecuteNonQuery();
 
-        using var createWhatsAppMessages = connection.CreateCommand();
-        createWhatsAppMessages.CommandText = """
-            CREATE TABLE IF NOT EXISTS "WhatsAppMessages" (
-                "UserId" TEXT NOT NULL,
-                "Id" TEXT NOT NULL,
-                "Date" TEXT NOT NULL,
-                "Kind" TEXT NOT NULL,
-                "ToNumber" TEXT NOT NULL,
-                "Body" TEXT NOT NULL,
-                "Status" TEXT NOT NULL,
-                "ProviderMessageId" TEXT NULL,
-                "Error" TEXT NULL,
-                "CreatedAt" TEXT NOT NULL,
-                CONSTRAINT "PK_WhatsAppMessages" PRIMARY KEY ("UserId", "Id")
-            );
-            """;
-        createWhatsAppMessages.ExecuteNonQuery();
+        WhatsAppSchema.Ensure(connection);
     }
     finally
     {
@@ -7040,6 +7024,7 @@ public sealed class ArxTaskDbContext(DbContextOptions<ArxTaskDbContext> options)
         modelBuilder.Entity<CompanyVisitEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<ReportEntity>().HasKey(item => new { item.UserId, item.Id });
         modelBuilder.Entity<WhatsAppMessageEntity>().HasKey(item => new { item.UserId, item.Id });
+        modelBuilder.Entity<WhatsAppMessageEntity>().HasIndex(item => new { item.UserId, item.Date, item.Kind });
         modelBuilder.Entity<OfferEntity>().HasMany(item => item.Items).WithOne().HasForeignKey(item => new { item.UserId, item.OfferId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<InvoiceEntity>().HasMany(item => item.Items).WithOne().HasForeignKey(item => new { item.UserId, item.InvoiceId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<RouteEntity>().HasMany(item => item.Stops).WithOne().HasForeignKey(item => new { item.UserId, item.RouteId }).HasPrincipalKey(item => new { item.UserId, item.Id }).OnDelete(DeleteBehavior.Cascade);

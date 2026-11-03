@@ -189,6 +189,33 @@ public sealed class WhatsAppMessageEntity : IOwnedEntity
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+// Mevcut veritabanlarında EnsureCreated tabloyu oluşturmaz; açılışta burada eklenir.
+public static class WhatsAppSchema
+{
+    public static void Ensure(System.Data.Common.DbConnection connection)
+    {
+        using var create = connection.CreateCommand();
+        create.CommandText = """
+            CREATE TABLE IF NOT EXISTS "WhatsAppMessages" (
+                "UserId" TEXT NOT NULL,
+                "Id" TEXT NOT NULL,
+                "Date" TEXT NOT NULL,
+                "Kind" TEXT NOT NULL,
+                "ToNumber" TEXT NOT NULL,
+                "Body" TEXT NOT NULL,
+                "Status" TEXT NOT NULL,
+                "ProviderMessageId" TEXT NULL,
+                "Error" TEXT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                CONSTRAINT "PK_WhatsAppMessages" PRIMARY KEY ("UserId", "Id")
+            );
+            CREATE INDEX IF NOT EXISTS "IX_WhatsAppMessages_UserId_Date_Kind"
+                ON "WhatsAppMessages" ("UserId", "Date", "Kind");
+            """;
+        create.ExecuteNonQuery();
+    }
+}
+
 public sealed record WhatsAppSendResult(string Status, string? ProviderMessageId, string? Error);
 
 public interface IWhatsAppSender
@@ -295,6 +322,8 @@ public sealed class WhatsAppDigestService(
 {
     // Her test mesajı ücretli olduğu için kullanıcı başına günlük gerçek test sınırı.
     const int MaxTestsPerDay = 3;
+    // Bağlantı yokken (dry-run) testler ücretsiz ama kayıtları sınırsız birikmesin.
+    const int MaxTestRecordsPerDay = 10;
 
     (DateTime Local, DateOnly Today, string TodayText) Now()
     {
@@ -345,9 +374,14 @@ public sealed class WhatsAppDigestService(
             ?? WhatsAppDigestComposer.ComposeEmpty(user.Name, user.Email);
         if (string.IsNullOrEmpty(user.WhatsAppNumber)) return new WhatsAppTestResult(content.PreviewText, "no-number", null);
 
-        var realTests = await db.WhatsAppMessages.CountAsync(item =>
-            item.UserId == user.Id && item.Date == todayText && item.Kind == "test" && item.Status != "dry-run");
-        if (realTests >= MaxTestsPerDay) return new WhatsAppTestResult(content.PreviewText, "preview-only", null);
+        var testStatuses = await db.WhatsAppMessages
+            .Where(item => item.UserId == user.Id && item.Date == todayText && item.Kind == "test")
+            .Select(item => item.Status)
+            .ToListAsync();
+        if (testStatuses.Count >= MaxTestRecordsPerDay || testStatuses.Count(status => status != "dry-run") >= MaxTestsPerDay)
+        {
+            return new WhatsAppTestResult(content.PreviewText, "preview-only", null);
+        }
 
         var result = await SendAndLog(user, "test", content, todayText);
         return new WhatsAppTestResult(content.PreviewText, result.Status, result.Error);

@@ -267,6 +267,66 @@ public sealed class WhatsAppDigestServiceTests : IDisposable
         Assert.Equal("dry-run", result.Status);
         Assert.Equal("dry-run", Assert.Single(Log()).Status);
     }
+
+    [Fact]
+    public async Task Dry_run_tests_are_capped_per_day()
+    {
+        sender.IsConfigured = false;
+        for (var i = 0; i < 10; i++) Assert.Equal("dry-run", (await service.SendTestAsync(UserId)).Status);
+        var eleventh = await service.SendTestAsync(UserId);
+
+        Assert.Equal("preview-only", eleventh.Status);
+        Assert.Equal("Günaydın Mehmet, bugün yapılacakların: Bugün planlanmış görevin yok.", eleventh.Preview);
+        Assert.Equal(10, Log().Count);
+
+        At("2026-11-04 07:00");
+        Assert.Equal("dry-run", (await service.SendTestAsync(UserId)).Status);
+    }
+
+    [Fact]
+    public async Task Dry_run_tests_do_not_use_real_test_limit()
+    {
+        sender.IsConfigured = false;
+        for (var i = 0; i < 5; i++) await service.SendTestAsync(UserId);
+        sender.IsConfigured = true;
+
+        Assert.Equal("sent", (await service.SendTestAsync(UserId)).Status);
+    }
+
+    [Fact]
+    public void Model_has_user_date_kind_index()
+    {
+        Assert.Contains(IndexesOf(connection, "WhatsAppMessages"), name => name == "IX_WhatsAppMessages_UserId_Date_Kind");
+    }
+
+    [Fact]
+    public void Schema_adds_index_to_existing_table()
+    {
+        using var legacy = new SqliteConnection("Data Source=:memory:");
+        legacy.Open();
+        WhatsAppSchema.Ensure(legacy);
+        using (var drop = legacy.CreateCommand())
+        {
+            drop.CommandText = """DROP INDEX "IX_WhatsAppMessages_UserId_Date_Kind";""";
+            drop.ExecuteNonQuery();
+        }
+
+        WhatsAppSchema.Ensure(legacy);
+        WhatsAppSchema.Ensure(legacy);
+
+        Assert.Single(IndexesOf(legacy, "WhatsAppMessages"), name => name == "IX_WhatsAppMessages_UserId_Date_Kind");
+    }
+
+    static List<string> IndexesOf(SqliteConnection target, string table)
+    {
+        using var command = target.CreateCommand();
+        command.CommandText = "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = $table";
+        command.Parameters.AddWithValue("$table", table);
+        using var reader = command.ExecuteReader();
+        var names = new List<string>();
+        while (reader.Read()) names.Add(reader.GetString(0));
+        return names;
+    }
 }
 
 sealed class FakeSender : IWhatsAppSender
