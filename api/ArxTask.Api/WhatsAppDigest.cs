@@ -1,4 +1,8 @@
 using System.Globalization;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 // ---------------------------------------------------------------------------
@@ -166,4 +170,107 @@ public static class WhatsAppSettingsRules
         if (time is not null) user.WhatsAppDigestTime = time.Trim();
         return null;
     }
+}
+
+// Her gönderim denemesinin kaydı; "günde bir kez" kuralının dayanağı.
+public sealed class WhatsAppMessageEntity : IOwnedEntity
+{
+    public string UserId { get; set; } = "";
+    public string Id { get; set; } = "";
+    public string Date { get; set; } = "";          // yyyy-MM-dd (Türkiye saati)
+    public string Kind { get; set; } = "scheduled"; // scheduled | test
+    public string ToNumber { get; set; } = "";
+    public string Body { get; set; } = "";
+    public string Status { get; set; } = "";        // sent | dry-run | failed
+    public string? ProviderMessageId { get; set; }
+    public string? Error { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed record WhatsAppSendResult(string Status, string? ProviderMessageId, string? Error);
+
+public interface IWhatsAppSender
+{
+    bool IsConfigured { get; }
+    Task<WhatsAppSendResult> SendDigestAsync(string toE164, WhatsAppDigestContent content, CancellationToken ct = default);
+}
+
+// Meta WhatsApp Cloud API ile onaylı şablon mesajı gönderir. AccessToken veya PhoneNumberId
+// boşsa hiçbir istek atmaz ve "dry-run" döner.
+public sealed class WhatsAppCloudSender(IHttpClientFactory httpClientFactory, IConfiguration configuration) : IWhatsAppSender
+{
+    string? Setting(string key)
+    {
+        var value = configuration[$"WhatsApp:{key}"];
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    public bool IsConfigured => Setting("AccessToken") is not null && Setting("PhoneNumberId") is not null;
+
+    public async Task<WhatsAppSendResult> SendDigestAsync(string toE164, WhatsAppDigestContent content, CancellationToken ct = default)
+    {
+        if (!IsConfigured) return new WhatsAppSendResult("dry-run", null, null);
+
+        var version = Setting("ApiVersion") ?? "v23.0";
+        var url = $"https://graph.facebook.com/{version}/{Setting("PhoneNumberId")}/messages";
+        var payload = BuildTemplatePayload(
+            WhatsAppPhone.ToGraphRecipient(toE164),
+            Setting("TemplateName") ?? "planix_sabah_ozeti",
+            Setting("TemplateLanguage") ?? "tr",
+            content.NameParam,
+            content.ListParam);
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Setting("AccessToken"));
+            var client = httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(20);
+            using var response = await client.SendAsync(request, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            JsonNode? node = null;
+            try { node = JsonNode.Parse(body); } catch (JsonException) { }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var message = node?["error"]?["message"]?.GetValue<string>() ?? $"HTTP {(int)response.StatusCode}";
+                return new WhatsAppSendResult("failed", null, message);
+            }
+
+            return new WhatsAppSendResult("sent", node?["messages"]?[0]?["id"]?.GetValue<string>(), null);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+            // Hata metni yalnızca istisna mesajını taşır; başlıklar/anahtar loglanmaz.
+            return new WhatsAppSendResult("failed", null, exception.Message);
+        }
+    }
+
+    public static string BuildTemplatePayload(string recipient, string templateName, string language, string nameParam, string listParam) =>
+        JsonSerializer.Serialize(new
+        {
+            messaging_product = "whatsapp",
+            to = recipient,
+            type = "template",
+            template = new
+            {
+                name = templateName,
+                language = new { code = language },
+                components = new object[]
+                {
+                    new
+                    {
+                        type = "body",
+                        parameters = new object[]
+                        {
+                            new { type = "text", text = nameParam },
+                            new { type = "text", text = listParam }
+                        }
+                    }
+                }
+            }
+        });
 }
