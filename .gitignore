@@ -69,3 +69,7 @@ apk-build.log
 
 # === SDD çalışma alanı (git-ignored scratch) ===
 .superpowers/
+
+# === Claude Code (yerel) ===
+.claude/worktrees/
+.claude/settings.local.json

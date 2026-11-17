@@ -1,0 +1,4 @@
+# Shell script'leri Windows'ta da LF kalsın: CRLF ile bash "$'\r': command not found" verir
+# (core.autocrlf=true olan makinelerde hook'lar ve ops/ script'leri bozulmasın).
+*.sh text eol=lf
+ops/deploy/known_hosts text eol=lf
