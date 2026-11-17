@@ -1,0 +1,125 @@
+# main'e giren her commit: GitHub'da derle → paketi sunucuya gönder → sunucu kurar.
+#
+#   API  (api/ArxTask.Api/**)  → dotnet publish → api.megaajans.de  (Plesk .NET, Passenger)
+#   Web  (app/, components/…)  → next build     → megaajans.de      (Plesk Node.js, Passenger)
+#
+# Yalnız değişen taraf çıkar; ikisi de değiştiyse önce API, sonra web. Mobil uygulama
+# (ArX Task mobile) burada yok, APK elle derlenir.
+#
+# Testler burada TEKRAR koşmuyor: aynı testler PR'da "Doğrulama" (ci.yml) ile koşuyor
+# ve PR ancak o yeşilse birleşiyor. Bozuk bir sürüm yine de çıkarsa sunucudaki sağlık
+# kontrolü önceki sürüme kendiliğinden döner.
+#
+# Sunucudaki karşılığı ops/deploy/planix-kapi.sh: anahtar yalnız o kapıya açılıyor
+# (kabuk açamaz). Kurulum mantığı repodan değil, sunucudaki o dosyadan çalışır.
+#
+# Repo herkese açık: GitHub'ın makinelerinde koşar (açık repoda dakika ücretsiz).
+#
+# Gerekenler (Settings → Secrets and variables → Actions):
+#   Secret    PLANIX_SSH_KEY   kısıtlı deploy anahtarının özel kısmı
+#   Variable  DEPLOY_ACIK      "true" iken çalışır; değilse hiçbir şey yapmaz
+name: Canlıya çıkar
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - ".claude/**"
+      - "docs/**"
+      - "ArX Task mobile/**"
+  workflow_dispatch:
+    inputs:
+      hedef:
+        description: "Ne çıkarılsın"
+        type: choice
+        options: [ikisi, api, web]
+        default: ikisi
+
+# iki deploy üst üste binmesin; yarıdakini iptal etme, sıraya al
+concurrency:
+  group: deploy-canli
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sunucu:
+    if: vars.DEPLOY_ACIK == 'true'
+    # sunucuyla aynı Ubuntu sürümü: web paketindeki hazır derlenmiş node_modules parçaları
+    # (Next SWC vb.) sunucunun glibc'sine uysun. Sunucu yükseltilirse bu da değişmeli.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Ne değişti
+        id: degisen
+        env:
+          OLAY: ${{ github.event_name }}
+          HEDEF: ${{ inputs.hedef }}
+          ONCEKI: ${{ github.event.before }}
+        run: |
+          api=false; web=false
+          if [ "$OLAY" = workflow_dispatch ]; then
+            [ "$HEDEF" != web ] && api=true
+            [ "$HEDEF" != api ] && web=true
+          elif ! git cat-file -e "$ONCEKI^{commit}" 2>/dev/null; then
+            api=true; web=true
+          else
+            degisen=$(git diff --name-only "$ONCEKI" "$GITHUB_SHA")
+            echo "$degisen" | grep -qE '^api/ArxTask\.Api/' && api=true
+            echo "$degisen" | grep -qE '^(app|components|lib|locales|public|types)/|^(package(-lock)?\.json|next\.config\.ts|server\.js|tailwind\.config\.ts|postcss\.config\.js|tsconfig\.json|\.env\.production)$' && web=true
+          fi
+          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "API: $api · web: $web"
+
+      - name: SSH hazırlığı
+        if: steps.degisen.outputs.api == 'true' || steps.degisen.outputs.web == 'true'
+        run: |
+          printf '%s\n' "${{ secrets.PLANIX_SSH_KEY }}" > "$RUNNER_TEMP/id_deploy"
+          chmod 600 "$RUNNER_TEMP/id_deploy"
+          echo "SSH_DEPLOY=ssh -i $RUNNER_TEMP/id_deploy -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/ops/deploy/known_hosts root@87.106.47.17" >> "$GITHUB_ENV"
+
+      # ---------- API ----------
+      - uses: actions/setup-dotnet@v5
+        if: steps.degisen.outputs.api == 'true'
+        with:
+          dotnet-version: 10.0.x
+      - name: API'yi derle
+        if: steps.degisen.outputs.api == 'true'
+        run: dotnet publish api/ArxTask.Api/ArxTask.Api.csproj -c Release -o "$RUNNER_TEMP/api"
+      - name: API'yi canlıya çıkar
+        if: steps.degisen.outputs.api == 'true'
+        # appsettings*.json, web.config ve veritabanları sunucuda kalır; kapı onları ezmez
+        run: tar -C "$RUNNER_TEMP/api" -czf - . | $SSH_DEPLOY "api $GITHUB_SHA"
+
+      # ---------- Web ----------
+      - uses: actions/setup-node@v5
+        if: steps.degisen.outputs.web == 'true'
+        with:
+          node-version: 24
+          cache: npm
+      - name: Web'i derle
+        if: steps.degisen.outputs.web == 'true'
+        run: |
+          npm ci
+          npm run build
+      - name: Web'i canlıya çıkar
+        if: steps.degisen.outputs.web == 'true'
+        run: |
+          parcalar=(.next public server.js package.json package-lock.json next.config.ts tsconfig.json .env.production)
+          # package-lock canlıdakiyle aynıysa node_modules gönderilmez (~600 MB), sunucudaki kullanılır
+          if [ "$($SSH_DEPLOY "kilit $(sha256sum package-lock.json | cut -d' ' -f1)")" != ayni ]; then
+            echo "package-lock değişmiş: node_modules da gönderiliyor"
+            parcalar+=(node_modules)
+          fi
+          tar --exclude=.next/cache -czf - "${parcalar[@]}" | $SSH_DEPLOY "web $GITHUB_SHA"
+
+      - name: Anahtarı sil
+        if: always()
+        run: rm -f "$RUNNER_TEMP/id_deploy"

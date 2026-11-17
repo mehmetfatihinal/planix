@@ -1,0 +1,51 @@
+# PR doğrulaması: web (tip kontrolü, mantık testleri, derleme) ve API (dotnet test).
+#
+# Yalnız PR'da çalışıyor, her push'ta değil: oto-push her Claude cevabından sonra
+# push ediyor, her birinde test koşmak boşa iş. Taslak (draft) PR'da atlanır;
+# "Ready for review" deyince koşar.
+#
+# Repo herkese açık (public): GitHub'ın kendi makinelerinde koşar ve açık repolarda
+# Actions dakikası ücretsiz. Kendi sunucumuzdaki runner açık repoda KULLANILMAZ
+# (dışarıdan gelen bir PR sunucuda kod çalıştırmasın).
+#
+# "npm run lint" burada yok: kodda eskiden kalma ~100 lint hatası var; temizlenince eklenmeli.
+name: Doğrulama
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:logic
+      - run: npm run build
+
+  api:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test api/ArxTask.Api.Tests
